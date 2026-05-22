@@ -4,6 +4,7 @@ import json
 import time
 import base64
 import copy
+import re
 import logging
 from datetime import datetime, timezone
 import sys
@@ -284,15 +285,19 @@ def ask_groq_fix(file_text, file_name):
 
 def extract_code_block(text):
     """يستخرج الكود من بين ``` ``` في الرد"""
-    # يحاول ```python ... ``` أو ``` ... ```
+    if not text or not isinstance(text, str):
+        return None
     patterns = [
         r"```python\s*([\s\S]+?)```",
         r"```\w*\s*([\s\S]+?)```",
     ]
     for pat in patterns:
-        m = re.search(pat, text)
-        if m:
-            return m.group(1).strip()
+        try:
+            m = re.search(pat, text)
+            if m:
+                return m.group(1).strip()
+        except Exception:
+            continue
     return None
 
 
@@ -323,12 +328,25 @@ def handle_file_fix(chat_id, file_content, file_name, reply_to_id=None):
         return
 
     send_message(chat_id, "🔍 جاري تحليل الملف وإصلاح الأعطال...", reply_to=reply_to_id)
+
+    # نحاول Groq أولاً، ثم AI Search كـ fallback
     result = ask_groq_fix(file_text, file_name)
+    if not result:
+        prompt = (
+            f"أنت خبير Python. لديك الملف التالي:\n\n"
+            f"اسم الملف: {file_name}\n\n"
+            f"```\n{file_text[:4000]}\n```\n\n"
+            "المطلوب:\n"
+            "1. اذكر الأعطال والمشاكل بقائمة مرقمة\n"
+            "2. أرسل الكود المصلح كاملاً بين ```python و```"
+        )
+        result = ask_ai_search(prompt, "claude")
 
     if not result:
         send_message(chat_id, "❌ فشل التحليل، حاول مرة أخرى", reply_to=reply_to_id)
         return
 
+    log.info(f"result type: {type(result)}, value[:100]: {str(result)[:100]}")
     fixed_code = extract_code_block(result)
 
     # إرسال الشرح (نزيل الكود الطويل من الرسالة لتكون نظيفة)
