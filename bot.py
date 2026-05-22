@@ -6,8 +6,9 @@ import base64
 import copy
 import logging
 from datetime import datetime, timezone
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from keyboards import main_menu, back_button, admin_menu
+from keyboards import main_menu, back_button, admin_menu, channel_menu, subscription_required_keyboard
 
 # ══════════════════════════════════════
 #  إعداد السجلات
@@ -17,7 +18,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("bot.log", encoding="utf-8"),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stdout)
     ]
 )
 log = logging.getLogger(__name__)
@@ -27,11 +28,59 @@ log = logging.getLogger(__name__)
 # ══════════════════════════════════════
 BOT_TOKEN    = os.getenv("BOT_TOKEN",    "ضع_توكن_البوت_هنا")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "ضع_مفتاح_GROQ_هنا")
+# ══ 6 مفاتيح Groq — كل مفتاح متغير منفصل في Railway ══
+# GROQ_API_KEY_1 , GROQ_API_KEY_2 , ... , GROQ_API_KEY_6
+GROQ_API_KEYS = [
+    os.getenv(f"GROQ_API_KEY_{i}")
+    for i in range(1, 7)
+]
+GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]  # نزيل الفارغة
+if not GROQ_API_KEYS:
+    # fallback للمتغير القديم
+    _old = os.getenv("GROQ_API_KEY", "ضع_مفتاح_GROQ_هنا")
+    GROQ_API_KEYS = [_old]
+_groq_index = 0
+
+def _get_groq_key():
+    return GROQ_API_KEYS[_groq_index % len(GROQ_API_KEYS)]
+
+def _next_groq_key():
+    global _groq_index
+    _groq_index = (_groq_index + 1) % len(GROQ_API_KEYS)
+    return GROQ_API_KEYS[_groq_index]
+
 ADMINS       = [int(x) for x in os.getenv("ADMINS", "123456789").split(",") if x.strip()]
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+
+# ══ AI Multi Search API ══
+FIREBASE_KEY = "AIzaSyA27E7jUV8osRY7NzwP2fZwGoTkp5gJhZw"
+SEARCH_URL   = "https://ai-multi-search-backend-321697147922.europe-west6.run.app/ask"
+FIREBASE_HEADERS = {
+    "User-Agent"       : "Dalvik/2.1.0 (Linux; U; Android 16; 2311DRK48G Build/BP2A.250605.031.A3)",
+    "Connection"       : "Keep-Alive",
+    "Accept-Encoding"  : "gzip",
+    "Content-Type"     : "application/json",
+    "X-Android-Package": "com.lmtechstudio.aimultisearch",
+    "X-Android-Cert"   : "5D08264B44E0E53FBCCC70B4F016474CC6C5AB5C",
+    "Accept-Language"  : "ar-EG, en-US",
+    "X-Client-Version" : "Android/Fallback/X23001000/FirebaseCore-Android",
+    "X-Firebase-GMPID" : "1:321697147922:android:26e6fb8e30dcc23dfffccb",
+    "X-Firebase-Client": "H4sIAAAAAAAA_6tWykhNLCpJSk0sKVayio7VUSpLLSrOzM9TslIyUqoFAFyivEQfAAAA"
+}
+SEARCH_CFG = {
+    "perplexity": {"app_version": "1.2.8",    "search_id": "825a35c5-aac2-49d7-8317-5b7a68ae6cae"},
+    "claude"    : {"app_version": "1.2.8",    "search_id": "825a35c5-aac2-49d7-8317-5b7a68ae6cae"},
+    "openai"    : {"app_version": "DEV_TEST", "search_id": "f0a6705c-e33e-4288-a3ef-c91cd6564b59"},
+    "deepseek"  : {"app_version": "1.2.8",    "search_id": "f0a6705c-e33e-4288-a3ef-c91cd6564b59"},
+    "gemini"    : {"app_version": "1.2.8",    "search_id": "b2ed082e-5793-4de0-9e42-c8c7fb57b5d5"},
+    "llama"     : {"app_version": "1.2.8",    "search_id": "b2ed082e-5793-4de0-9e42-c8c7fb57b5d5"},
+}
+_firebase_token       = None
+_firebase_token_expiry = 0
+user_model = {}  # {uid: "claude"} — النموذج المختار لكل مستخدم
+DEFAULT_MODEL = "claude"
 
 # ══════════════════════════════════════
 #  إعدادات ثابتة
@@ -48,12 +97,20 @@ SYSTEM_PROMPT = """
 MAX_HISTORY   = 20
 RATE_LIMIT    = 2
 MAX_FILE_SIZE = 5 * 1024 * 1024
-MEMORY_FILE   = "user_memory.json"
-STATS_FILE    = "stats.json"
-CHATS_FILE    = "bot_chats.json"
-BANNED_FILE   = "banned_users.json"
-SUPPORTED_EXT = ('.txt', '.py', '.js', '.json', '.html',
-                 '.css', '.md', '.xml', '.csv')
+
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+MEMORY_FILE   = f"{DATA_DIR}/user_memory.json"
+STATS_FILE    = f"{DATA_DIR}/stats.json"
+CHATS_FILE    = f"{DATA_DIR}/bot_chats.json"
+BANNED_FILE   = f"{DATA_DIR}/banned_users.json"
+CHANNEL_FILE  = f"{DATA_DIR}/required_channel.json"
+
+SUPPORTED_EXT = (
+    '.txt', '.py', '.js', '.json',
+    '.html', '.css', '.md', '.xml', '.csv'
+)
 
 # حالات معلّقة
 pending_broadcast       = {}
@@ -61,6 +118,7 @@ pending_group_broadcast = {}
 pending_ban             = {}
 pending_unban           = {}
 pending_clear           = {}
+pending_addchannel      = {}
 
 # ══════════════════════════════════════
 #  حفظ / تحميل JSON
@@ -94,6 +152,10 @@ stats             = load_json(STATS_FILE, {
 bot_chats         = load_json(CHATS_FILE, {})
 banned_users      = set(load_json(BANNED_FILE, []))
 user_last_message = {}
+
+# تحميل إعدادات القناة الإجبارية
+_channel_data    = load_json(CHANNEL_FILE, {"channel": None})
+REQUIRED_CHANNEL = _channel_data.get("channel")  # مثال: "@mychannel"
 
 # ══════════════════════════════════════
 #  دوال تيليجرام
@@ -155,6 +217,138 @@ def send_typing(chat_id):
         pass
 
 
+
+
+def send_document(chat_id, file_bytes, file_name, caption=""):
+    """يرسل ملف للمستخدم"""
+    try:
+        requests.post(
+            f"{TELEGRAM_URL}/sendDocument",
+            data={"chat_id": str(chat_id), "caption": caption, "parse_mode": "Markdown"},
+            files={"document": (file_name, file_bytes)},
+            timeout=30
+        )
+    except Exception as e:
+        log.error(f"send_document: {e}")
+
+
+def ask_groq_fix(file_text, file_name):
+    """
+    يطلب من النموذج:
+    1. تحليل الأعطال
+    2. إرجاع الكود المصلح كاملاً بين ``` ```
+    """
+    prompt = f"""أنت خبير Python. لديك الملف التالي:
+
+اسم الملف: {file_name}
+
+```
+{file_text[:6000]}
+```
+
+المطلوب:
+1. اذكر الأعطال والمشاكل الموجودة بوضوح (قائمة مرقمة)
+2. بعدها أرسل الكود المصلح كاملاً بين ```python و```
+لا تحذف أي كود — أرسل الملف كاملاً مصلحاً."""
+
+    messages = [
+        {"role": "system", "content": "أنت خبير Python. أجب بالعربية دائماً."},
+        {"role": "user",   "content": prompt}
+    ]
+    attempts = len(GROQ_API_KEYS)
+    for _ in range(attempts):
+        headers = {
+            "Authorization": f"Bearer {_get_groq_key()}",
+            "Content-Type" : "application/json"
+        }
+        data = {
+            "model"      : "llama-3.1-8b-instant",
+            "messages"   : messages,
+            "temperature": 0.2,
+            "max_tokens" : 4096
+        }
+        try:
+            r = requests.post(GROQ_URL, headers=headers, json=data, timeout=90)
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            log.warning(f"Groq fix key #{_groq_index+1} returned {r.status_code}, switching...")
+            _next_groq_key()
+            time.sleep(0.3)
+            continue
+        except requests.exceptions.Timeout:
+            return None
+        except Exception:
+            return None
+    return None
+
+
+def extract_code_block(text):
+    """يستخرج الكود من بين ``` ``` في الرد"""
+    # يحاول ```python ... ``` أو ``` ... ```
+    patterns = [
+        r"```python\s*([\s\S]+?)```",
+        r"```\w*\s*([\s\S]+?)```",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def process_file(content, name):
+    try:
+        if name.lower().endswith(SUPPORTED_EXT):
+            try:
+                return content.decode("utf-8")
+            except UnicodeDecodeError:
+                return content.decode("latin-1", errors="replace")
+        return f"ملف: {name}\nالحجم: {len(content):,} بايت\n(نوع غير مدعوم للقراءة النصية)"
+    except Exception as e:
+        return f"خطأ في قراءة الملف: {e}"
+
+
+def handle_file_fix(chat_id, file_content, file_name, reply_to_id=None):
+    """
+    المنطق الكامل: يحلل الملف، يصلحه، يرسل الشرح + الملف المصلح
+    """
+    send_typing(chat_id)
+    file_text = process_file(file_content, file_name)
+
+    # لو الملف غير نصي
+    if "نوع غير مدعوم" in file_text:
+        send_message(chat_id,
+                     f"❌ نوع الملف `{file_name}` غير مدعوم للتحليل.\nالمدعوم: .py .js .txt .json .html .css .md",
+                     reply_to=reply_to_id)
+        return
+
+    send_message(chat_id, "🔍 جاري تحليل الملف وإصلاح الأعطال...", reply_to=reply_to_id)
+    result = ask_groq_fix(file_text, file_name)
+
+    if not result:
+        send_message(chat_id, "❌ فشل التحليل، حاول مرة أخرى", reply_to=reply_to_id)
+        return
+
+    fixed_code = extract_code_block(result)
+
+    # إرسال الشرح (نزيل الكود الطويل من الرسالة لتكون نظيفة)
+    explanation = re.sub(r"```[\s\S]*?```", "", result).strip()
+    if explanation:
+        send_message(chat_id, explanation, reply_to=reply_to_id)
+
+    # إرسال الملف المصلح إن وُجد
+    if fixed_code:
+        fixed_bytes = fixed_code.encode("utf-8")
+        # اسم الملف المصلح
+        name_parts = file_name.rsplit(".", 1)
+        fixed_name = f"{name_parts[0]}_fixed.{name_parts[1]}" if len(name_parts) == 2 else f"{file_name}_fixed"
+        send_document(chat_id, fixed_bytes, fixed_name,
+                      caption=f"✅ *الملف المصلح:* `{fixed_name}`")
+    else:
+        send_message(chat_id,
+                     "⚠️ لم يتمكن النموذج من استخراج كود مصلح كامل.\nجرب أرسل الملف مجدداً أو استخدم /dew مع سؤال محدد.",
+                     reply_to=reply_to_id)
+
 def get_file(file_id, max_size=MAX_FILE_SIZE):
     try:
         info = requests.get(
@@ -176,40 +370,69 @@ def get_file(file_id, max_size=MAX_FILE_SIZE):
 
 
 # ══════════════════════════════════════
+#  الاشتراك الإجباري
+# ══════════════════════════════════════
+def check_subscription(user_id):
+    """يتحقق إذا المستخدم مشترك في القناة الإجبارية"""
+    if not REQUIRED_CHANNEL:
+        return True
+    try:
+        r = requests.get(
+            f"{TELEGRAM_URL}/getChatMember",
+            params={"chat_id": REQUIRED_CHANNEL, "user_id": user_id},
+            timeout=10
+        )
+        data = r.json()
+        if not data.get("ok"):
+            return True  # لو فشل التحقق، نتجاوز
+        status = data["result"].get("status", "")
+        return status in ("member", "administrator", "creator")
+    except Exception:
+        return True
+
+def set_required_channel(channel):
+    """حفظ القناة الإجبارية"""
+    global REQUIRED_CHANNEL
+    REQUIRED_CHANNEL = channel
+    save_json(CHANNEL_FILE, {"channel": channel})
+
+# ══════════════════════════════════════
 #  دوال Groq
 # ══════════════════════════════════════
 def ask_groq(messages):
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type" : "application/json"
-    }
+    """يحاول كل المفاتيح عند 429 قبل الاستسلام"""
     data = {
-        "model"      : "llama-3.3-70b-versatile",
+        "model"      : "llama-3.1-8b-instant",
         "messages"   : messages,
         "temperature": 0.3,
         "max_tokens" : 2048
     }
-    try:
-        r = requests.post(GROQ_URL, headers=headers, json=data, timeout=60)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.Timeout:
-        return "⏱ انتهت مهلة الاتصال، حاول مرة أخرى"
-    except requests.exceptions.HTTPError:
-        if r.status_code == 429:
-            return "⏳ الخادم مشغول حالياً، حاول بعد لحظة"
-        return f"❌ خطأ HTTP {r.status_code}"
-    except requests.exceptions.RequestException as e:
-        return f"❌ خطأ في الاتصال: {e}"
-    except (KeyError, IndexError):
-        return "❌ استجابة غير صحيحة من الخادم"
+    attempts = len(GROQ_API_KEYS)
+    for _ in range(attempts):
+        headers = {
+            "Authorization": f"Bearer {_get_groq_key()}",
+            "Content-Type" : "application/json"
+        }
+        try:
+            r = requests.post(GROQ_URL, headers=headers, json=data, timeout=60)
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            # أي خطأ — جرب المفتاح التالي
+            log.warning(f"Groq key #{_groq_index+1} returned {r.status_code}, switching...")
+            _next_groq_key()
+            time.sleep(0.3)
+            continue
+        except requests.exceptions.Timeout:
+            return "⏱ انتهت مهلة الاتصال، حاول مرة أخرى"
+        except requests.exceptions.RequestException as e:
+            return f"❌ خطأ في الاتصال: {e}"
+        except (KeyError, IndexError):
+            return "❌ استجابة غير صحيحة من الخادم"
+    return "⏳ كل المفاتيح مشغولة حالياً، حاول بعد لحظة"
 
 
 def ask_groq_vision(messages, image_b64):
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type" : "application/json"
-    }
+    """يحاول كل المفاتيح عند 429 قبل الاستسلام"""
     msgs = copy.deepcopy(messages)
     last_text = msgs[-1]["content"]
     msgs[-1]["content"] = [
@@ -217,25 +440,117 @@ def ask_groq_vision(messages, image_b64):
         {"type": "image_url", "image_url": {"url": image_b64}}
     ]
     data = {
-        "model"      : "meta-llama/llama-4-scout-17b-16e-instruct",
+        "model"      : "llama-3.2-90b-vision-preview",
         "messages"   : msgs,
         "temperature": 0.3,
         "max_tokens" : 2048
     }
+    attempts = len(GROQ_API_KEYS)
+    for _ in range(attempts):
+        headers = {
+            "Authorization": f"Bearer {_get_groq_key()}",
+            "Content-Type" : "application/json"
+        }
+        try:
+            r = requests.post(GROQ_URL, headers=headers, json=data, timeout=90)
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            if r.status_code == 400:
+                return "❌ خطأ في الصورة: تأكد أن الصورة واضحة وصيغتها JPEG/PNG"
+            log.warning(f"Groq vision key #{_groq_index+1} returned {r.status_code}, switching...")
+            _next_groq_key()
+            time.sleep(0.3)
+            continue
+        except requests.exceptions.Timeout:
+            return "⏱ انتهت مهلة الاتصال عند معالجة الصورة"
+        except Exception as e:
+            return f"❌ خطأ في معالجة الصورة: {e}"
+    return "⏳ كل المفاتيح مشغولة حالياً، حاول بعد لحظة"
+
+
+# ══════════════════════════════════════
+#  AI Multi Search API
+# ══════════════════════════════════════
+def get_firebase_token():
+    global _firebase_token, _firebase_token_expiry
+    if _firebase_token and time.time() < _firebase_token_expiry - 60:
+        return _firebase_token
     try:
-        r = requests.post(GROQ_URL, headers=headers, json=data, timeout=90)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.Timeout:
-        return "⏱ انتهت مهلة الاتصال عند معالجة الصورة"
-    except requests.exceptions.HTTPError:
-        if r.status_code == 400:
-            return "❌ خطأ في الصورة: تأكد أن الصورة واضحة وصيغتها JPEG/PNG"
-        if r.status_code == 429:
-            return "⏳ الخادم مشغول، حاول بعد لحظة"
-        return f"❌ خطأ HTTP {r.status_code}"
+        r = requests.post(
+            "https://www.googleapis.com/identitytoolkit/v3/relyingparty/signupNewUser",
+            params={"key": FIREBASE_KEY},
+            data=json.dumps({"clientType": "CLIENT_TYPE_ANDROID"}),
+            headers=FIREBASE_HEADERS,
+            timeout=15
+        )
+        data = r.json()
+        _firebase_token        = "Bearer " + data["idToken"]
+        _firebase_token_expiry = time.time() + int(data["expiresIn"])
+        return _firebase_token
     except Exception as e:
-        return f"❌ خطأ في معالجة الصورة: {e}"
+        log.error(f"Firebase token error: {e}")
+        return None
+
+
+def ask_ai_search(question, provider="claude"):
+    token = get_firebase_token()
+    if not token:
+        return "❌ فشل الاتصال بالخادم، حاول مرة أخرى"
+
+    cfg = SEARCH_CFG.get(provider, SEARCH_CFG["claude"])
+    av  = cfg["app_version"]
+    prompt = (
+        "You MUST answer in the EXACT same language as the user question.\n"
+        "Do NOT mix languages. Use clean bullet points or short paragraphs.\n\n"
+        f"User question:\n{question}"
+    )
+    if provider == "deepseek":
+        prompt = "Never reply in Chinese unless explicitly asked.\n\n" + prompt
+
+    payload = {
+        "provider"   : provider,
+        "prompt"     : prompt,
+        "plan"       : "ULTRA",
+        "app_version": av
+    }
+    headers = {
+        "User-Agent"       : "okhttp/4.12.0",
+        "Accept-Encoding"  : "gzip",
+        "authorization"    : token,
+        "x-plan"           : "ULTRA",
+        "x-app-version"    : av,
+        "x-search-id"      : cfg["search_id"],
+        "x-search-expected": "2",
+        "content-type"     : "application/json; charset=utf-8"
+    }
+    try:
+        r = requests.post(SEARCH_URL, data=json.dumps(payload),
+                          headers=headers, timeout=30)
+        data = r.json()
+        if data.get("ok"):
+            return data.get("answer", "❌ لا يوجد جواب")
+        return f"❌ خطأ: {data.get('message', 'غير معروف')}"
+    except requests.exceptions.Timeout:
+        return "⏱ انتهت مهلة الاتصال، حاول مرة أخرى"
+    except Exception as e:
+        return f"❌ خطأ في الاتصال: {e}"
+
+
+def model_keyboard(selected=None):
+    models = [
+        ("🔵 Claude",      "claude"),
+        ("🟢 GPT-4",       "openai"),
+        ("🟣 Gemini",      "gemini"),
+        ("🔴 DeepSeek",    "deepseek"),
+        ("🟡 Perplexity",  "perplexity"),
+        ("🦙 Llama",       "llama"),
+    ]
+    kb = []
+    for label, key in models:
+        tick = " ✅" if key == selected else ""
+        kb.append([{"text": f"{label}{tick}", "callback_data": f"model_{key}"}])
+    kb.append([{"text": "🔙 رجوع", "callback_data": "main_menu"}])
+    return {"inline_keyboard": kb}
 
 
 # ══════════════════════════════════════
@@ -260,21 +575,15 @@ def unregister_chat(chat_id):
 # ══════════════════════════════════════
 #  إدارة ذاكرة المستخدم
 # ══════════════════════════════════════
-def process_file(content, name):
-    try:
-        if name.lower().endswith(SUPPORTED_EXT):
-            try:
-                return content.decode("utf-8")
-            except UnicodeDecodeError:
-                return content.decode("latin-1", errors="replace")
-        return f"ملف: {name}\nالحجم: {len(content):,} بايت\n(نوع غير مدعوم للقراءة النصية)"
-    except Exception as e:
-        return f"خطأ في قراءة الملف: {e}"
 
-
-def get_history(chat_id):
-    cid = str(chat_id)
-    if cid not in user_memory:
+def get_history(chat_id, user_info=None):
+    """
+    يجلب تاريخ المحادثة.
+    user_info: dict من message["from"] — يُستخدم لإشعار الأدمن بالمستخدم الجديد.
+    """
+    cid    = str(chat_id)
+    is_new = cid not in user_memory
+    if is_new:
         user_memory[cid] = {
             "history"  : [{"role": "system", "content": SYSTEM_PROMPT}],
             "name"     : "",
@@ -284,6 +593,23 @@ def get_history(chat_id):
         }
         stats["total_users"] += 1
         save_json(STATS_FILE, stats)
+
+        # ── إشعار الأدمن بمستخدم جديد ──
+        if user_info:
+            name   = user_info.get("first_name", "") or user_info.get("username", "مجهول")
+            uname  = user_info.get("username", "")
+            uid_v  = user_info.get("id", "")
+            uname_display = f"@{uname}" if uname else "بدون يوزر"
+            notif = (
+    f"🆕 *مستخدم جديد دخل البوت!*\n\n"
+    f"👤 الاسم: {name}\n"
+    f"🔗 اليوزر: {uname_display}\n"
+    f"🆔 الآيدي: `{uid_v}`\n"
+    f"👥 عدد المستخدمين: `{stats['total_users']}`"
+)
+            for admin_id in ADMINS:
+                send_message(admin_id, notif)
+
     return user_memory[cid]["history"]
 
 def trim_history(chat_id):
@@ -293,7 +619,8 @@ def trim_history(chat_id):
         user_memory[cid]["history"] = [h[0]] + h[-(MAX_HISTORY - 1):]
 
 def push_user(chat_id, content):
-    get_history(chat_id).append({"role": "user", "content": content})
+    h = get_history(chat_id)
+    h.append({"role": "user", "content": content})
     trim_history(chat_id)
 
 def push_assistant(chat_id, content):
@@ -316,6 +643,7 @@ def build_stats_text(cid=None):
         pass
     groups   = sum(1 for v in bot_chats.values() if v.get("type") in ("group","supergroup"))
     channels = sum(1 for v in bot_chats.values() if v.get("type") == "channel")
+    ch_line  = f"\n📌 قناة إجبارية      : `{REQUIRED_CHANNEL or 'لا توجد'}`"
     lines = [
         "📊 *إحصائيات البوت الكاملة*\n",
         f"👥 إجمالي المستخدمين : `{stats['total_users']}`",
@@ -326,6 +654,7 @@ def build_stats_text(cid=None):
         f"🏘 المجموعات         : `{groups}`",
         f"📣 القنوات           : `{channels}`",
         f"🚫 المحظورون         : `{len(banned_users)}`",
+        ch_line,
         f"🕐 تاريخ التشغيل     : `{started}`",
     ]
     if cid:
@@ -381,7 +710,7 @@ def handle_dew(message, chat_id, reply_to_id):
         send_message(chat_id, reply, reply_to=reply_to_id)
         return
 
-    # رد على ملف
+    # رد على ملف — تحليل وإصلاح تلقائي
     if "document" in replied:
         doc       = replied["document"]
         file_name = doc.get("file_name", "unknown")
@@ -389,16 +718,9 @@ def handle_dew(message, chat_id, reply_to_id):
         if err:
             send_message(chat_id, err, reply_to=reply_to_id)
             return
-        file_text = process_file(file_content, file_name)
-        user_msg  = f"ملف: {file_name}\n\n{file_text[:3000]}"
-        if question:
-            user_msg += f"\n\nالسؤال: {question}"
-        push_user(cid, user_msg)
-        reply = ask_groq(get_history(cid))
-        push_assistant(cid, reply)
         stats["total_files"] = stats.get("total_files", 0) + 1
         save_json(STATS_FILE, stats)
-        send_message(chat_id, reply, reply_to=reply_to_id)
+        handle_file_fix(chat_id, file_content, file_name, reply_to_id)
         return
 
     # رد على نص
@@ -432,19 +754,73 @@ def handle_callback(callback):
 
     answer_callback(cb_id)
 
+    if data == "stats_me":
+
+        user_data = user_memory.get(uid, {})
+
+        text = (
+            "📊 *إحصائياتك*\n\n"
+            f"🧠 الرسائل المحفوظة: `{len(user_data.get('history', [])) - 1}`\n"
+            f"📨 عدد رسائلك: `{user_data.get('msg_count', 0)}`\n"
+            f"📅 تاريخ الانضمام: `{user_data.get('joined_at', '—')[:10]}`"
+        )
+
+        edit_message(
+            chat_id,
+            message_id,
+            text,
+            back_button()
+        )
+        return
+
+    # ── زر التحقق من الاشتراك ──
+    if data == "check_subscription":
+        if check_subscription(int(uid)):
+            edit_message(chat_id, message_id,
+                         "✅ *تم التحقق! أهلاً بك.*\n\nالآن يمكنك استخدام البوت.",
+                         main_menu())
+        else:
+            answer_callback(cb_id, "❌ لم تشترك بعد! اشترك ثم اضغط التحقق.", alert=True)
+        return
+
+    if data == "noop":
+        return
+
     if data == "main_menu":
         edit_message(chat_id, message_id, "🏠 *القائمة الرئيسية*", main_menu())
         return
 
     if data == "ask_me":
         edit_message(chat_id, message_id,
-                     "💬 *اسألني أي شيء عن Python!*\n\nاكتب سؤالك مباشرة هنا.",
+                     "💬 *اسألني أي شيء!*\n\nاكتب سؤالك مباشرة هنا.",
                      back_button())
         return
 
-    # أزرار الأدمن
+    if data == "choose_model":
+        selected = user_model.get(uid, DEFAULT_MODEL)
+        edit_message(chat_id, message_id,
+                     "🤖 *اختر النموذج الذي تريد التحدث معه:*",
+                     model_keyboard(selected))
+        return
+
+    if data.startswith("model_"):
+        provider = data.replace("model_", "")
+        if provider in SEARCH_CFG:
+            user_model[uid] = provider
+            names = {"claude":"Claude","openai":"GPT-4","gemini":"Gemini",
+                     "deepseek":"DeepSeek","perplexity":"Perplexity","llama":"Llama"}
+            edit_message(chat_id, message_id,
+                         f"✅ *تم اختيار {names.get(provider, provider)}!*\n\nاكتب سؤالك الآن.",
+                         model_keyboard(provider))
+        return
+
+    # أزرار الأدمن — حماية
     if not is_admin and data.startswith("admin"):
         answer_callback(cb_id, "⛔ غير مصرح لك", alert=True)
+        return
+
+    if data == "back_admin":
+        edit_message(chat_id, message_id, "🛠 *لوحة الأدمن*", admin_menu())
         return
 
     if data == "admin_stats":
@@ -477,6 +853,28 @@ def handle_callback(callback):
                      "📣 *أرسل الآن نص الرسالة لجميع المجموعات:*", back_button())
         return
 
+    # ── إدارة القناة الإجبارية ──
+    if data == "admin_channel_menu":
+        edit_message(chat_id, message_id,
+                     "📌 *إدارة الاشتراك الإجباري*",
+                     channel_menu(REQUIRED_CHANNEL))
+        return
+
+    if data == "admin_addchannel_prompt":
+        pending_addchannel[uid] = True
+        edit_message(chat_id, message_id,
+                     "📌 *أرسل يوزرنيم القناة:*\n\nمثال: `@mychannel`\n\n"
+                     "⚠️ تأكد أن البوت أدمن في القناة أولاً!",
+                     back_button())
+        return
+
+    if data == "admin_removechannel":
+        set_required_channel(None)
+        edit_message(chat_id, message_id,
+                     "✅ *تم إلغاء الاشتراك الإجباري بنجاح.*",
+                     admin_menu())
+        return
+
     if data == "admin_ban_prompt":
         pending_ban[uid] = True
         edit_message(chat_id, message_id,
@@ -499,11 +897,11 @@ def handle_callback(callback):
 # ══════════════════════════════════════
 #  أوامر DM
 # ══════════════════════════════════════
-def handle_command(chat_id, command, is_admin, user_name="", username=""):
+def handle_command(chat_id, command, is_admin, user_name="", username="", user_obj=None):
     cid = str(chat_id)
 
     if command.startswith("/start"):
-        get_history(cid)
+        get_history(cid, user_obj)
         user_memory[cid]["name"]     = user_name
         user_memory[cid]["username"] = username
         save_json(MEMORY_FILE, user_memory)
@@ -513,6 +911,9 @@ def handle_command(chat_id, command, is_admin, user_name="", username=""):
                      "أو أرسل صورة/ملف للتحليل.\n\n"
                      "في المجموعات استخدم الأمر /dew",
                      reply_markup=main_menu())
+        # لوحة الأدمن تلقائياً عند /start
+        if is_admin:
+            send_message(chat_id, "🛠 *لوحة الأدمن*", reply_markup=admin_menu())
         return True
 
     if command == "/menu":
@@ -589,6 +990,9 @@ def _do_group_broadcast(admin_id, msg_text):
 # ══════════════════════════════════════
 offset = 0
 log.info("🚀 البوت يعمل...")
+log.info(f"🔑 عدد مفاتيح Groq المحملة: {len(GROQ_API_KEYS)}")
+for _i, _k in enumerate(GROQ_API_KEYS):
+    log.info(f"   مفتاح #{_i+1}: {_k[:8]}...")
 
 while True:
     try:
@@ -663,6 +1067,17 @@ while True:
                     if uid in pending_group_broadcast and pending_group_broadcast.pop(uid):
                         _do_group_broadcast(uid, text)
                         continue
+                    if uid in pending_addchannel and pending_addchannel.pop(uid):
+                        ch = text.strip()
+                        if not ch.startswith("@"):
+                            ch = "@" + ch
+                        set_required_channel(ch)
+                        send_message(uid,
+                                     f"✅ *تم تفعيل الاشتراك الإجباري!*\n\n"
+                                     f"📌 القناة: `{ch}`\n\n"
+                                     f"⚠️ تأكد أن البوت أدمن في القناة.",
+                                     reply_markup=admin_menu())
+                        continue
                     if uid in pending_ban and pending_ban.pop(uid):
                         banned_users.add(text.strip())
                         save_json(BANNED_FILE, list(banned_users))
@@ -683,7 +1098,17 @@ while True:
                             send_message(uid, f"❓ المستخدم `{target}` غير موجود")
                         continue
 
-                    if handle_command(chat_id, text, is_admin, user_name, username):
+                    if handle_command(chat_id, text, is_admin, user_name, username, user):
+                        continue
+
+                    # ── تحقق من الاشتراك الإجباري (غير الأدمن فقط) ──
+                    if not is_admin and uid and REQUIRED_CHANNEL and not check_subscription(int(uid)):
+                        send_message(
+                            chat_id,
+                            f"⚠️ *يجب الاشتراك في قناتنا أولاً!*\n\n"
+                            f"اشترك ثم اضغط ✅ تحققت.",
+                            reply_markup=subscription_required_keyboard(REQUIRED_CHANNEL)
+                        )
                         continue
 
                     now  = time.time()
@@ -695,11 +1120,21 @@ while True:
 
                     push_user(chat_id, text)
                     send_typing(chat_id)
-                    reply = ask_groq(get_history(chat_id))
+                    provider = user_model.get(uid, DEFAULT_MODEL)
+                    reply = ask_ai_search(text, provider)
                     push_assistant(chat_id, reply)
                     send_message(chat_id, reply)
 
                 elif "photo" in message and not is_group:
+                    # ── تحقق من الاشتراك الإجباري ──
+                    if not is_admin and uid and REQUIRED_CHANNEL and not check_subscription(int(uid)):
+                        send_message(
+                            chat_id,
+                            f"⚠️ *يجب الاشتراك في قناتنا أولاً!*\n\n"
+                            f"اشترك ثم اضغط ✅ تحققت.",
+                            reply_markup=subscription_required_keyboard(REQUIRED_CHANNEL)
+                        )
+                        continue
                     file_content, err = get_file(message["photo"][-1]["file_id"])
                     if err:
                         send_message(chat_id, err)
@@ -708,27 +1143,31 @@ while True:
                         push_user(chat_id, caption)
                         send_typing(chat_id)
                         img_b64 = "data:image/jpeg;base64," + base64.b64encode(file_content).decode()
-                        reply = ask_groq_vision(get_history(chat_id), img_b64)
+                        reply = ask_groq_vision(get_history(chat_id, user), img_b64)
                         push_assistant(chat_id, reply)
                         stats["total_images"] = stats.get("total_images", 0) + 1
                         save_json(STATS_FILE, stats)
                         send_message(chat_id, reply)
 
                 elif "document" in message and not is_group:
+                    # ── تحقق من الاشتراك الإجباري ──
+                    if not is_admin and uid and REQUIRED_CHANNEL and not check_subscription(int(uid)):
+                        send_message(
+                            chat_id,
+                            f"⚠️ *يجب الاشتراك في قناتنا أولاً!*\n\n"
+                            f"اشترك ثم اضغط ✅ تحققت.",
+                            reply_markup=subscription_required_keyboard(REQUIRED_CHANNEL)
+                        )
+                        continue
                     doc       = message["document"]
                     file_name = doc.get("file_name", "unknown")
                     file_content, err = get_file(doc["file_id"])
                     if err:
                         send_message(chat_id, err)
                     else:
-                        send_typing(chat_id)
-                        file_text = process_file(file_content, file_name)
-                        push_user(chat_id, f"ملف: {file_name}\n\n{file_text[:3000]}")
-                        reply = ask_groq(get_history(chat_id))
-                        push_assistant(chat_id, reply)
                         stats["total_files"] = stats.get("total_files", 0) + 1
                         save_json(STATS_FILE, stats)
-                        send_message(chat_id, reply)
+                        handle_file_fix(chat_id, file_content, file_name)
 
             except Exception as e:
                 log.error(f"update error: {e}", exc_info=True)
@@ -740,3 +1179,4 @@ while True:
     except Exception as e:
         log.error(f"connection error: {e}")
         time.sleep(5)
+
