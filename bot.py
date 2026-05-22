@@ -458,7 +458,7 @@ def ask_groq_vision(messages, image_b64):
         {"type": "image_url", "image_url": {"url": image_b64}}
     ]
     data = {
-        "model"      : "llama-3.2-90b-vision-preview",
+        "model"      : "llama-3.2-11b-vision-preview",
         "messages"   : msgs,
         "temperature": 0.3,
         "max_tokens" : 2048
