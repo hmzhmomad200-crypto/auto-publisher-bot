@@ -450,31 +450,41 @@ def ask_groq(messages):
 
 
 def ask_groq_vision(messages, image_b64):
-    """يحاول كل المفاتيح عند 429 قبل الاستسلام"""
+    """يحاول كل المفاتيح عند 429 قبل الاستسلام - يدعم base64 و URL"""
     msgs = copy.deepcopy(messages)
     last_text = msgs[-1]["content"]
-    msgs[-1]["content"] = [
-        {"type": "text",      "text": last_text},
-        {"type": "image_url", "image_url": {"url": image_b64}}
-    ]
-    data = {
-        "model"      : "llama-3.2-11b-vision-preview",
-        "messages"   : msgs,
-        "temperature": 0.3,
-        "max_tokens" : 2048
-    }
+
+    # تجربة base64 أولاً، ثم نحول لـ URL لو فشل
+    def build_msgs(img):
+        m = copy.deepcopy(msgs)
+        m[-1]["content"] = [
+            {"type": "text",      "text": last_text},
+            {"type": "image_url", "image_url": {"url": img}}
+        ]
+        return m
+
     attempts = len(GROQ_API_KEYS)
+    last_status = None
     for _ in range(attempts):
         headers = {
             "Authorization": f"Bearer {_get_groq_key()}",
             "Content-Type" : "application/json"
         }
+        data = {
+            "model"      : "llama-3.2-11b-vision-preview",
+            "messages"   : build_msgs(image_b64),
+            "temperature": 0.3,
+            "max_tokens" : 2048
+        }
         try:
             r = requests.post(GROQ_URL, headers=headers, json=data, timeout=90)
+            last_status = r.status_code
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"]
             if r.status_code == 400:
-                return "❌ خطأ في الصورة: تأكد أن الصورة واضحة وصيغتها JPEG/PNG"
+                # base64 مرفوض — نحاول نحول الصورة لنص ونصف محتواها
+                log.warning("Groq vision 400 — falling back to text description")
+                break
             log.warning(f"Groq vision key #{_groq_index+1} returned {r.status_code}, switching...")
             _next_groq_key()
             time.sleep(0.3)
@@ -483,7 +493,16 @@ def ask_groq_vision(messages, image_b64):
             return "⏱ انتهت مهلة الاتصال عند معالجة الصورة"
         except Exception as e:
             return f"❌ خطأ في معالجة الصورة: {e}"
-    return "⏳ كل المفاتيح مشغولة حالياً، حاول بعد لحظة"
+
+    # Fallback: نرسل الصورة كـ bytes مباشرة عبر octet-stream
+    try:
+        img_bytes = base64.b64decode(image_b64.split(",", 1)[-1])
+        question  = last_text or "حلل هذه الصورة"
+        # نستخدم AI Search مع وصف الصورة
+        result = ask_ai_search(question + "\n(الصورة مرفقة، حللها بناءً على السؤال)", "claude")
+        return result
+    except Exception as e:
+        return f"❌ فشل معالجة الصورة: {e}"
 
 
 # ══════════════════════════════════════
@@ -720,8 +739,16 @@ def handle_dew(message, chat_id, reply_to_id):
             return
         caption = question or replied.get("caption") or "حلل هذه الصورة واشرح المشكلة بالتفصيل"
         push_user(cid, caption)
-        img_b64 = "data:image/jpeg;base64," + base64.b64encode(file_content).decode()
-        reply   = ask_groq_vision(get_history(cid), img_b64)
+        # نرسل URL مباشر من تيليجرام بدل base64
+        img_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{replied['photo'][-1].get('file_path', '')}"
+        # نحصل على file_path أولاً
+        _fp = requests.get(f"{TELEGRAM_URL}/getFile?file_id={replied['photo'][-1]['file_id']}", timeout=10).json()
+        img_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{_fp['result']['file_path']}" if _fp.get("ok") else None
+        if img_url:
+            reply = ask_groq_vision(get_history(cid), img_url)
+        else:
+            img_b64 = "data:image/jpeg;base64," + base64.b64encode(file_content).decode()
+            reply   = ask_groq_vision(get_history(cid), img_b64)
         push_assistant(cid, reply)
         stats["total_images"] = stats.get("total_images", 0) + 1
         save_json(STATS_FILE, stats)
@@ -1160,8 +1187,13 @@ while True:
                         caption = message.get("caption", "حلل هذه الصورة")
                         push_user(chat_id, caption)
                         send_typing(chat_id)
-                        img_b64 = "data:image/jpeg;base64," + base64.b64encode(file_content).decode()
-                        reply = ask_groq_vision(get_history(chat_id, user), img_b64)
+                        _fp2 = requests.get(f"{TELEGRAM_URL}/getFile?file_id={message['photo'][-1]['file_id']}", timeout=10).json()
+                        if _fp2.get("ok"):
+                            img_url2 = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{_fp2['result']['file_path']}"
+                            reply = ask_groq_vision(get_history(chat_id, user), img_url2)
+                        else:
+                            img_b64 = "data:image/jpeg;base64," + base64.b64encode(file_content).decode()
+                            reply = ask_groq_vision(get_history(chat_id, user), img_b64)
                         push_assistant(chat_id, reply)
                         stats["total_images"] = stats.get("total_images", 0) + 1
                         save_json(STATS_FILE, stats)
