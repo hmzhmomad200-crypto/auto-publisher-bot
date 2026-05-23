@@ -901,11 +901,12 @@ def handle_callback(callback):
 
     if data.startswith("model_"):
         provider = data.replace("model_", "")
-        if provider in SEARCH_CFG:
+        ALL_MODELS = list(SEARCH_CFG.keys()) + ["groq_fast", "gemini_pro"]
+        if provider in ALL_MODELS:
             user_model[uid] = provider
             names = {"claude":"Claude","openai":"GPT-4","gemini":"Gemini",
                      "deepseek":"DeepSeek","perplexity":"Perplexity","llama":"Llama",
-                     "groq_fast":"Groq Fast","gemini_pro":"Gemini Pro"}
+                     "groq_fast":"Groq Fast ⚡","gemini_pro":"Gemini Pro ✨"}
             edit_message(chat_id, message_id,
                          f"✅ *تم اختيار {names.get(provider, provider)}!*\n\nاكتب سؤالك الآن.",
                          model_keyboard(provider))
