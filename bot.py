@@ -81,7 +81,11 @@ SEARCH_CFG = {
 _firebase_token       = None
 _firebase_token_expiry = 0
 user_model = {}  # {uid: "claude"} — النموذج المختار لكل مستخدم
-DEFAULT_MODEL = "claude"
+DEFAULT_MODEL  = "claude"
+
+# ══ Google Gemini API ══
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCeHXhuC4jegrYos4upBpj8HaOexDEKlS0")
+GEMINI_URL     = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 # ══════════════════════════════════════
 #  إعدادات ثابتة
@@ -329,16 +333,15 @@ def handle_file_fix(chat_id, file_content, file_name, reply_to_id=None):
 
     send_message(chat_id, "🔍 جاري تحليل الملف وإصلاح الأعطال...", reply_to=reply_to_id)
 
-    # نحاول Groq أولاً، ثم AI Search كـ fallback
-    result = ask_groq_fix(file_text, file_name)
+    # Gemini أولاً، ثم Groq، ثم AI Search
+    result = ask_gemini_file(file_text, file_name)
+    if not result:
+        result = ask_groq_fix(file_text, file_name)
     if not result:
         prompt = (
-            f"أنت خبير Python. لديك الملف التالي:\n\n"
-            f"اسم الملف: {file_name}\n\n"
+            f"أنت خبير برمجي. لديك الملف: {file_name}\n\n"
             f"```\n{file_text[:4000]}\n```\n\n"
-            "المطلوب:\n"
-            "1. اذكر الأعطال والمشاكل بقائمة مرقمة\n"
-            "2. أرسل الكود المصلح كاملاً بين ```python و```"
+            "اذكر الأعطال ثم أرسل الكود المصلح كاملاً بين ```python و```"
         )
         result = ask_ai_search(prompt, "claude")
 
@@ -591,6 +594,80 @@ def model_keyboard(selected=None):
 
 
 # ══════════════════════════════════════
+#  Google Gemini API
+# ══════════════════════════════════════
+def ask_gemini(text):
+    """نص فقط"""
+    try:
+        payload = {"contents": [{"parts": [{"text": text}]}]}
+        r = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload, timeout=30
+        )
+        if r.status_code == 200:
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        log.warning(f"Gemini text error: {r.status_code} {r.text[:100]}")
+        return None
+    except Exception as e:
+        log.error(f"ask_gemini: {e}")
+        return None
+
+
+def ask_gemini_vision(image_bytes, question):
+    """صورة + سؤال"""
+    try:
+        img_b64 = base64.b64encode(image_bytes).decode()
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": question or "حلل هذه الصورة بالتفصيل"},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                ]
+            }]
+        }
+        r = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload, timeout=60
+        )
+        if r.status_code == 200:
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        log.warning(f"Gemini vision error: {r.status_code} {r.text[:100]}")
+        return None
+    except Exception as e:
+        log.error(f"ask_gemini_vision: {e}")
+        return None
+
+
+def ask_gemini_file(file_text, file_name, question=""):
+    """تحليل ملف نصي وإصلاحه"""
+    prompt = (
+        f"أنت خبير برمجي. لديك الملف التالي:\n\n"
+        f"اسم الملف: {file_name}\n\n"
+        f"```\n{file_text[:8000]}\n```\n\n"
+    )
+    if question:
+        prompt += f"السؤال: {question}\n\n"
+    prompt += (
+        "المطلوب:\n"
+        "1. اذكر الأعطال والمشاكل بقائمة مرقمة\n"
+        "2. أرسل الكود المصلح كاملاً بين ```python و```"
+    )
+    try:
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        r = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload, timeout=60
+        )
+        if r.status_code == 200:
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        log.warning(f"Gemini file error: {r.status_code} {r.text[:100]}")
+        return None
+    except Exception as e:
+        log.error(f"ask_gemini_file: {e}")
+        return None
+
+
+# ══════════════════════════════════════
 #  إدارة الجروبات والقنوات
 # ══════════════════════════════════════
 def register_chat(chat):
@@ -739,7 +816,11 @@ def handle_dew(message, chat_id, reply_to_id):
             return
         caption = question or replied.get("caption") or "حلل هذه الصورة واشرح المشكلة بالتفصيل"
         push_user(cid, caption)
-        reply = ask_ai_search(caption + "\n(المستخدم أرسل صورة، حللها)", "claude")
+        reply = ask_gemini_vision(file_content, caption)
+        if not reply:
+            reply = ask_ai_search(caption + "\n(المستخدم أرسل صورة، حللها)", "claude")
+        if not reply:
+            reply = "❌ فشل تحليل الصورة، حاول مرة أخرى"
         push_assistant(cid, reply)
         stats["total_images"] = stats.get("total_images", 0) + 1
         save_json(STATS_FILE, stats)
@@ -1178,7 +1259,11 @@ while True:
                         caption = message.get("caption", "حلل هذه الصورة")
                         push_user(chat_id, caption)
                         send_typing(chat_id)
-                        reply = ask_ai_search(caption + "\n(المستخدم أرسل صورة، حللها)", "claude")
+                        reply = ask_gemini_vision(file_content, caption)
+                        if not reply:
+                            reply = ask_ai_search(caption + "\n(المستخدم أرسل صورة، حللها)", "claude")
+                        if not reply:
+                            reply = "❌ فشل تحليل الصورة، حاول مرة أخرى"
                         push_assistant(chat_id, reply)
                         stats["total_images"] = stats.get("total_images", 0) + 1
                         save_json(STATS_FILE, stats)
