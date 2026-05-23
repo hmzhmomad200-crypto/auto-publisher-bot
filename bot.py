@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from keyboards import main_menu, back_button, admin_menu, channel_menu, subscription_required_keyboard
+from keyboards import main_menu, back_button, admin_menu, channel_menu, subscription_required_keyboard, model_keyboard
 
 # ══════════════════════════════════════
 #  إعداد السجلات
@@ -576,21 +576,6 @@ def ask_ai_search(question, provider="claude"):
         return f"❌ خطأ في الاتصال: {e}"
 
 
-def model_keyboard(selected=None):
-    models = [
-        ("🔵 Claude",      "claude"),
-        ("🟢 GPT-4",       "openai"),
-        ("🟣 Gemini",      "gemini"),
-        ("🔴 DeepSeek",    "deepseek"),
-        ("🟡 Perplexity",  "perplexity"),
-        ("🦙 Llama",       "llama"),
-    ]
-    kb = []
-    for label, key in models:
-        tick = " ✅" if key == selected else ""
-        kb.append([{"text": f"{label}{tick}", "callback_data": f"model_{key}"}])
-    kb.append([{"text": "🔙 رجوع", "callback_data": "main_menu"}])
-    return {"inline_keyboard": kb}
 
 
 # ══════════════════════════════════════
@@ -907,12 +892,6 @@ def handle_callback(callback):
         edit_message(chat_id, message_id, "🏠 *القائمة الرئيسية*", main_menu())
         return
 
-    if data == "ask_me":
-        edit_message(chat_id, message_id,
-                     "💬 *اسألني أي شيء!*\n\nاكتب سؤالك مباشرة هنا.",
-                     back_button())
-        return
-
     if data == "choose_model":
         selected = user_model.get(uid, DEFAULT_MODEL)
         edit_message(chat_id, message_id,
@@ -925,7 +904,8 @@ def handle_callback(callback):
         if provider in SEARCH_CFG:
             user_model[uid] = provider
             names = {"claude":"Claude","openai":"GPT-4","gemini":"Gemini",
-                     "deepseek":"DeepSeek","perplexity":"Perplexity","llama":"Llama"}
+                     "deepseek":"DeepSeek","perplexity":"Perplexity","llama":"Llama",
+                     "groq_fast":"Groq Fast","gemini_pro":"Gemini Pro"}
             edit_message(chat_id, message_id,
                          f"✅ *تم اختيار {names.get(provider, provider)}!*\n\nاكتب سؤالك الآن.",
                          model_keyboard(provider))
@@ -1238,7 +1218,14 @@ while True:
                     push_user(chat_id, text)
                     send_typing(chat_id)
                     provider = user_model.get(uid, DEFAULT_MODEL)
-                    reply = ask_ai_search(text, provider)
+                    if provider == "groq_fast":
+                        reply = ask_groq(get_history(chat_id))
+                    elif provider == "gemini_pro":
+                        reply = ask_gemini(text) or ask_ai_search(text, "gemini")
+                    else:
+                        reply = ask_ai_search(text, provider)
+                    if not reply:
+                        reply = "❌ فشل الاتصال، حاول مرة أخرى"
                     push_assistant(chat_id, reply)
                     send_message(chat_id, reply)
 
