@@ -7,9 +7,8 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 def main_menu():
     return {
         "inline_keyboard": [
-            [{"text": "💬 اسألني",           "callback_data": "ask_me"}],
-            [{"text": "🤖 اختر النموذج",     "callback_data": "choose_model"}],
-            [{"text": "📊 إحصائياتي",        "callback_data": "stats_me"}],
+            [{"text": "🤖 اختر النموذج",  "callback_data": "choose_model"}],
+            [{"text": "📊 إحصائياتي",     "callback_data": "stats_me"}],
             [{"text": "➕ أضفني للمجموعة",
               "url": f"https://t.me/{BOT_USERNAME}?startgroup=start"}],
         ]
@@ -22,6 +21,25 @@ def back_button():
             [{"text": "🔙 رجوع للقائمة", "callback_data": "main_menu"}]
         ]
     }
+
+
+def model_keyboard(selected=None):
+    models = [
+        ("Claude — 💬 شات",                        "claude"),
+        ("GPT-4 — 💬 شات",                         "openai"),
+        ("Gemini — 💬 شات",                        "gemini"),
+        ("DeepSeek — 💬 شات",                      "deepseek"),
+        ("Perplexity — 💬 شات + 🔍 بحث",           "perplexity"),
+        ("Llama — 💬 شات",                         "llama"),
+        ("Groq — 💬 شات ⚡ سريع",                  "groq_fast"),
+        ("Gemini Pro — 💬 شات + 📷 صور + 📂 ملفات","gemini_pro"),
+    ]
+    kb = []
+    for label, key in models:
+        tick = " ✅" if key == selected else ""
+        kb.append([{"text": f"{label}{tick}", "callback_data": f"model_{key}"}])
+    kb.append([{"text": "🔙 رجوع", "callback_data": "main_menu"}])
+    return {"inline_keyboard": kb}
 
 
 def admin_menu():
