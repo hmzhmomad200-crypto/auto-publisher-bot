@@ -739,16 +739,7 @@ def handle_dew(message, chat_id, reply_to_id):
             return
         caption = question or replied.get("caption") or "حلل هذه الصورة واشرح المشكلة بالتفصيل"
         push_user(cid, caption)
-        # نرسل URL مباشر من تيليجرام بدل base64
-        img_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{replied['photo'][-1].get('file_path', '')}"
-        # نحصل على file_path أولاً
-        _fp = requests.get(f"{TELEGRAM_URL}/getFile?file_id={replied['photo'][-1]['file_id']}", timeout=10).json()
-        img_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{_fp['result']['file_path']}" if _fp.get("ok") else None
-        if img_url:
-            reply = ask_groq_vision(get_history(cid), img_url)
-        else:
-            img_b64 = "data:image/jpeg;base64," + base64.b64encode(file_content).decode()
-            reply   = ask_groq_vision(get_history(cid), img_b64)
+        reply = ask_ai_search(caption + "\n(المستخدم أرسل صورة، حللها)", "claude")
         push_assistant(cid, reply)
         stats["total_images"] = stats.get("total_images", 0) + 1
         save_json(STATS_FILE, stats)
@@ -1187,13 +1178,7 @@ while True:
                         caption = message.get("caption", "حلل هذه الصورة")
                         push_user(chat_id, caption)
                         send_typing(chat_id)
-                        _fp2 = requests.get(f"{TELEGRAM_URL}/getFile?file_id={message['photo'][-1]['file_id']}", timeout=10).json()
-                        if _fp2.get("ok"):
-                            img_url2 = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{_fp2['result']['file_path']}"
-                            reply = ask_groq_vision(get_history(chat_id, user), img_url2)
-                        else:
-                            img_b64 = "data:image/jpeg;base64," + base64.b64encode(file_content).decode()
-                            reply = ask_groq_vision(get_history(chat_id, user), img_b64)
+                        reply = ask_ai_search(caption + "\n(المستخدم أرسل صورة، حللها)", "claude")
                         push_assistant(chat_id, reply)
                         stats["total_images"] = stats.get("total_images", 0) + 1
                         save_json(STATS_FILE, stats)
