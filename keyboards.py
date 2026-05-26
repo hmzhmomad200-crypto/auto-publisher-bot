@@ -57,6 +57,8 @@ def model_keyboard(selected=None):
         ("Llama — 💬 شات",                          "llama"),
         ("Groq — 💬 شات ⚡ سريع",                   "groq_fast"),
         ("Gemini Pro — 💬 شات + 📷 صور + 📂 ملفات", "gemini_pro"),
+        ("🎙 تحويل صوت لنص — Whisper",               "whisper"),
+        ("🎨 توليد صور — Stable Diffusion",           "image_gen"),
     ]
     rows = []
     for label, key in models:
