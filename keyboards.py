@@ -1,8 +1,7 @@
 import os
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
-WEBAPP_URL   = os.getenv("WEBAPP_URL", "https://yourdomain.com/index.html")
 
 # ═══════════════════════════════════════
 #  نظام الألوان (إيموجيات بديل بصري)
@@ -14,10 +13,6 @@ _COLOR_PREFIX = {
 }
 
 def btn(text, cbd=None, url=None, color=None):
-    """
-    ينشئ زر inline.
-    color: 'red' | 'green' | 'blue'  — يضيف إيموجي لوني قبل النص
-    """
     if color and color in _COLOR_PREFIX:
         text = f"{_COLOR_PREFIX[color]} {text}"
     if cbd:
@@ -27,15 +22,6 @@ def btn(text, cbd=None, url=None, color=None):
     return InlineKeyboardButton(text=text, callback_data="noop")
 
 def kb(*rows):
-    """
-    ينشئ InlineKeyboardMarkup من صفوف.
-    كل عنصر إما زر واحد أو list من الأزرار.
-    مثال:
-        kb(
-            btn("زر 1", cbd="a"),
-            [btn("زر 2", cbd="b"), btn("زر 3", cbd="c")],
-        )
-    """
     keyboard = []
     for row in rows:
         if isinstance(row, list):
@@ -48,14 +34,8 @@ def kb(*rows):
 #  القوائم
 # ═══════════════════════════════════════
 
-def webapp_btn(text, url=None):
-    """زر يفتح Mini App"""
-    _url = url or WEBAPP_URL
-    return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=_url))
-
 def main_menu():
     return kb(
-        webapp_btn("🚀 فتح القائمة الرئيسية"),
         btn("🤖 اختر النموذج",   cbd="choose_model"),
         btn("📊 إحصائياتي",      cbd="stats_me"),
         btn("💬 رصيدي",          cbd="my_credits"),
@@ -144,7 +124,6 @@ def confirm_keyboard(action, cancel="main_menu"):
     )
 
 def daily_limit_keyboard(channel_username=None):
-    """يظهر عند انتهاء الرصيد اليومي"""
     rows = []
     if channel_username:
         rows.append(btn("📢 اشترك للحصول على رصيد إضافي",
