@@ -496,7 +496,7 @@ async def generate_image(prompt: str) -> str | None:
             "guidance_scale": 7.5,
         }
     }
-    url = "https://api.replicate.com/v1/models/stability-ai/sdxl/predictions"
+    url = "https://api.replicate.com/v1/models/bytedance/sdxl-lightning-4step/predictions"
     try:
         async with aiohttp.ClientSession() as s:
             async with s.post(url, headers=headers, json=payload,
