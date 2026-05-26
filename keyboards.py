@@ -1,7 +1,8 @@
 import os
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
+WEBAPP_URL   = os.getenv("WEBAPP_URL", "https://yourdomain.com/index.html")
 
 # ═══════════════════════════════════════
 #  نظام الألوان (إيموجيات بديل بصري)
@@ -47,8 +48,14 @@ def kb(*rows):
 #  القوائم
 # ═══════════════════════════════════════
 
+def webapp_btn(text, url=None):
+    """زر يفتح Mini App"""
+    _url = url or WEBAPP_URL
+    return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=_url))
+
 def main_menu():
     return kb(
+        webapp_btn("🚀 فتح القائمة الرئيسية"),
         btn("🤖 اختر النموذج",   cbd="choose_model"),
         btn("📊 إحصائياتي",      cbd="stats_me"),
         btn("💬 رصيدي",          cbd="my_credits"),
