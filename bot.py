@@ -8,6 +8,8 @@ Auto Publisher Bot — aiogram 3.x
   • تصدير المستخدمين CSV
   • لغة الرد (عربي/إنجليزي) لكل مستخدم
   • نظام btn/kb مع ألوان إيموجية
+  • تحويل صوت لنص (Whisper - Hugging Face)
+  • توليد صور (Stable Diffusion - Replicate)
 """
 
 import asyncio
@@ -62,6 +64,8 @@ BOT_TOKEN    = os.getenv("BOT_TOKEN",    "ضع_توكن_البوت_هنا")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 ADMINS       = [int(x) for x in os.getenv("ADMINS", "123456789").split(",") if x.strip()]
 WEBAPP_URL   = os.getenv("WEBAPP_URL",   "https://yourdomain.com/index.html")
+HF_API_KEY   = os.getenv("HF_API_KEY",  "")   # Hugging Face — للصوت
+REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY", "")  # Replicate — للصور
 
 GROQ_API_KEYS = [os.getenv(f"GROQ_API_KEY_{i}") for i in range(1, 7)]
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
@@ -444,9 +448,83 @@ def push_assistant(chat_id, content):
     save_json(STATS_FILE, stats)
     save_json(MEMORY_FILE, user_memory)
 
+# u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650
+#  Whisper u2014 u062au062du0648u064au0644 u0635u0648u062a u0644u0646u0635 (Hugging Face)
+# u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650
 # ═══════════════════════════════════════════════════════════
 #  مساعد: تحقق شامل قبل الرد
 # ═══════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+#  Whisper — تحويل صوت لنص (Hugging Face)
+# ═══════════════════════════════════════════════════════════
+async def transcribe_voice(audio_bytes: bytes) -> str:
+    if not HF_API_KEY:
+        return "❌ HF_API_KEY غير موجود في المتغيرات"
+    url = "https://api-inference.huggingface.co/models/openai/whisper-large-v3"
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, headers=headers, data=audio_bytes,
+                              timeout=aiohttp.ClientTimeout(total=60)) as r:
+                if r.status == 200:
+                    res = await r.json()
+                    return res.get("text", "❌ لم يتم التعرف على الصوت")
+                elif r.status == 503:
+                    return "⏳ النموذج يتحمل، حاول بعد 30 ثانية"
+                else:
+                    return f"❌ خطأ {r.status}"
+    except Exception as e:
+        return f"❌ خطأ: {e}"
+
+# ═══════════════════════════════════════════════════════════
+#  Stable Diffusion — توليد صور (Replicate)
+# ═══════════════════════════════════════════════════════════
+async def generate_image(prompt: str) -> str | None:
+    if not REPLICATE_API_KEY:
+        return None
+    headers = {
+        "Authorization": f"Bearer {REPLICATE_API_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "wait",
+    }
+    payload = {
+        "input": {
+            "prompt": prompt,
+            "width": 768, "height": 768,
+            "num_inference_steps": 25,
+            "guidance_scale": 7.5,
+        }
+    }
+    url = "https://api.replicate.com/v1/models/stability-ai/sdxl/predictions"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, headers=headers, json=payload,
+                              timeout=aiohttp.ClientTimeout(total=120)) as r:
+                if r.status in (200, 201):
+                    res = await r.json()
+                    output = res.get("output")
+                    if output:
+                        return output[0] if isinstance(output, list) else output
+                    pred_id = res.get("id")
+                    if not pred_id:
+                        return None
+                    for _ in range(30):
+                        await asyncio.sleep(3)
+                        async with s.get(
+                            f"https://api.replicate.com/v1/predictions/{pred_id}",
+                            headers=headers,
+                        ) as poll:
+                            pres = await poll.json()
+                            if pres.get("status") == "succeeded":
+                                out = pres.get("output")
+                                return out[0] if isinstance(out, list) else out
+                            if pres.get("status") == "failed":
+                                return None
+    except Exception as e:
+        log.error(f"generate_image: {e}")
+    return None
+
 async def pre_check(message: Message) -> bool:
     """
     يتحقق من:
@@ -755,11 +833,13 @@ async def cmd_help(message: Message):
         "*في المحادثة الخاصة:*\n"
         "• اكتب سؤالك مباشرة\n"
         "• أرسل صورة فيها كود\n"
-        "• أرسل ملف .py أو .txt\n\n"
+        "• أرسل ملف .py أو .txt\n"
+        "• أرسل رسالة صوتية → يحولها لنص ويرد عليها 🎙\n"
+        "• `/image وصف بالإنجليزي` → يولد صورة 🎨\n\n"
         "*في المجموعات:*\n"
         "`/dew سؤالك هنا`\n"
         "رد على صورة/ملف/نص بـ /dew\n\n"
-        "*أوامر:* /menu /clear /stats /help",
+        "*أوامر:* /menu /clear /stats /help /image",
         reply_markup=back_button(),
     )
 
@@ -1021,6 +1101,58 @@ async def handle_private_document(message: Message):
 # ═══════════════════════════════════════════════════════════
 #  Handlers — Callbacks
 # ═══════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+#  Handler — صوت (Whisper)
+# ═══════════════════════════════════════════════════════════
+@dp.message(F.chat.type == "private", F.voice)
+async def handle_voice(message: Message):
+    if not await pre_check(message):
+        return
+    await bot.send_chat_action(message.chat.id, "typing")
+    await message.answer("🎙 جاري تحويل الصوت لنص...")
+    file       = await bot.get_file(message.voice.file_id)
+    file_bytes = await bot.download_file(file.file_path)
+    audio      = file_bytes.read()
+    text       = await transcribe_voice(audio)
+    cid        = str(message.chat.id)
+    if text.startswith("❌") or text.startswith("⏳"):
+        await message.answer(text)
+        return
+    await message.answer(f"📝 *النص المستخرج:*\n\n{text}")
+    # رد على النص تلقائياً
+    push_user(cid, text)
+    provider = user_model.get(str(message.from_user.id), DEFAULT_MODEL)
+    if provider == "groq_fast":
+        reply = await ask_groq(get_history(cid))
+    else:
+        reply = await ask_ai_search(text, provider)
+    if reply:
+        push_assistant(cid, reply)
+        await message.answer(reply)
+
+# ═══════════════════════════════════════════════════════════
+#  Handler — /image توليد صور
+# ═══════════════════════════════════════════════════════════
+@dp.message(Command("image"))
+async def cmd_image(message: Message):
+    if not await pre_check(message):
+        return
+    parts  = (message.text or "").split(None, 1)
+    prompt = parts[1].strip() if len(parts) > 1 else ""
+    if not prompt:
+        await message.answer(
+            "🎨 *توليد صور*\n\nأرسل وصف الصورة بالإنجليزي:\n`/image a beautiful sunset over the ocean`"
+        )
+        return
+    await bot.send_chat_action(message.chat.id, "upload_photo")
+    await message.answer("🎨 جاري توليد الصورة، انتظر...")
+    img_url = await generate_image(prompt)
+    if img_url:
+        await message.answer_photo(img_url, caption=f"🎨 `{prompt}`")
+    else:
+        await message.answer("❌ فشل توليد الصورة. تأكد من REPLICATE_API_KEY أو حاول لاحقاً.")
+
 @dp.callback_query()
 async def handle_callback(cb: CallbackQuery):
     data     = cb.data
@@ -1089,15 +1221,22 @@ async def handle_callback(cb: CallbackQuery):
 
     if data.startswith("model_"):
         provider  = data.replace("model_", "")
-        ALL_MODELS = list(SEARCH_CFG.keys()) + ["groq_fast", "gemini_pro"]
+        ALL_MODELS = list(SEARCH_CFG.keys()) + ["groq_fast", "gemini_pro", "whisper", "image_gen"]
         if provider in ALL_MODELS:
             user_model[uid] = provider
             names = {
                 "claude": "Claude", "openai": "GPT-4", "gemini": "Gemini",
                 "deepseek": "DeepSeek", "perplexity": "Perplexity", "llama": "Llama",
                 "groq_fast": "Groq Fast ⚡", "gemini_pro": "Gemini Pro ✨",
+                "whisper": "🎙 Whisper — تحويل صوت لنص",
+                "image_gen": "🎨 Stable Diffusion — توليد صور",
             }
-            await edit(f"✅ *تم اختيار {names.get(provider, provider)}!*\n\nاكتب سؤالك الآن.",
+            extra = ""
+            if provider == "whisper":
+                extra = "\n\n🎙 أرسل رسالة صوتية وسأحولها لنص."
+            elif provider == "image_gen":
+                extra = "\n\n🎨 أرسل `/image وصف الصورة بالإنجليزي`"
+            await edit(f"✅ *تم اختيار {names.get(provider, provider)}!*{extra}",
                        model_keyboard(provider))
         return
 
