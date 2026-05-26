@@ -525,6 +525,22 @@ async def generate_image(prompt: str) -> str | None:
         log.error(f"generate_image: {e}")
     return None
 
+
+# ═══════════════════════════════════════════════════════════
+#  إرسال آمن — يتجنب كسر Markdown
+# ═══════════════════════════════════════════════════════════
+async def safe_send(message, text: str, **kwargs):
+    """يحاول يرسل بـ Markdown، لو فشل يرسل بدونه"""
+    try:
+        await message.answer(text, **kwargs)
+    except Exception:
+        # أزل كل Markdown وأرسل نص عادي
+        plain = text.replace("*", "").replace("`", "").replace("_", "").replace("[", "").replace("]", "")
+        try:
+            await message.answer(plain, parse_mode=None, **{k:v for k,v in kwargs.items() if k != "parse_mode"})
+        except Exception as e:
+            log.error(f"safe_send failed: {e}")
+
 async def pre_check(message: Message) -> bool:
     """
     يتحقق من:
@@ -667,7 +683,7 @@ async def handle_file_fix(message: Message, file_content: bytes, file_name: str)
     fixed_code  = extract_code_block(result)
     explanation = re.sub(r"```[\s\S]*?```", "", result).strip()
     if explanation:
-        await message.answer(explanation)
+        await safe_send(message, explanation)
     if fixed_code:
         name_parts = file_name.rsplit(".", 1)
         fixed_name = f"{name_parts[0]}_fixed.{name_parts[1]}" if len(name_parts) == 2 else f"{file_name}_fixed"
@@ -1065,7 +1081,7 @@ async def handle_private_text(message: Message):
         reply = await ask_ai_search(message.text, provider)
     reply = reply or "❌ فشل الاتصال، حاول مرة أخرى"
     push_assistant(cid, reply)
-    await message.answer(reply)
+    await safe_send(message, reply)
 
 @dp.message(F.chat.type == "private", F.photo)
 async def handle_private_photo(message: Message):
@@ -1083,7 +1099,7 @@ async def handle_private_photo(message: Message):
     push_assistant(cid, reply)
     stats["total_images"] = stats.get("total_images", 0) + 1
     save_json(STATS_FILE, stats)
-    await message.answer(reply)
+    await safe_send(message, reply)
 
 @dp.message(F.chat.type == "private", F.document)
 async def handle_private_document(message: Message):
@@ -1119,7 +1135,7 @@ async def handle_voice(message: Message):
     text       = await transcribe_voice(audio)
     cid        = str(message.chat.id)
     if text.startswith("❌") or text.startswith("⏳"):
-        await message.answer(text)
+        await safe_send(message, text)
         return
     await message.answer(f"📝 *النص المستخرج:*\n\n{text}")
     # رد على النص تلقائياً
@@ -1131,7 +1147,7 @@ async def handle_voice(message: Message):
         reply = await ask_ai_search(text, provider)
     if reply:
         push_assistant(cid, reply)
-        await message.answer(reply)
+        await safe_send(message, reply)
 
 # ═══════════════════════════════════════════════════════════
 #  Handler — /image توليد صور
