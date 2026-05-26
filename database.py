@@ -13,7 +13,7 @@ import aiohttp
 
 log = logging.getLogger(__name__)
 
-TURSO_URL   = os.getenv("TURSO_DATABASE_URL", "")
+TURSO_URL   = os.getenv("TURSO_DATABASE_URL", "").replace("libsql://", "https://").rstrip("/")
 TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 
 # ═══════════════════════════════════════════════════════════
@@ -25,7 +25,7 @@ async def _execute(sql: str, params: list = None) -> dict:
     if not TURSO_URL or not TURSO_TOKEN:
         raise RuntimeError("TURSO_DATABASE_URL أو TURSO_AUTH_TOKEN غير موجودين في المتغيرات")
 
-    url = TURSO_URL.rstrip("/") + "/v2/pipeline"
+    url = TURSO_URL + "/v2/pipeline"
     headers = {
         "Authorization": f"Bearer {TURSO_TOKEN}",
         "Content-Type": "application/json",
@@ -57,7 +57,7 @@ async def _executemany(statements: list[tuple]) -> None:
     if not TURSO_URL or not TURSO_TOKEN:
         raise RuntimeError("TURSO credentials missing")
 
-    url = TURSO_URL.rstrip("/") + "/v2/pipeline"
+    url = TURSO_URL + "/v2/pipeline"
     headers = {
         "Authorization": f"Bearer {TURSO_TOKEN}",
         "Content-Type": "application/json",
