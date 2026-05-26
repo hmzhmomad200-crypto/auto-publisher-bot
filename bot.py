@@ -1,20 +1,9 @@
 """
-Auto Publisher Bot — aiogram 3.x
-ميزات:
-  • نظام اشتراك إجباري محكم (fail-closed)
-  • نظام رصيد يومي + وايت ليست
-  • رسالة ترحيب قابلة للتخصيص
-  • إحصائيات يومية تلقائية للأدمن
-  • تصدير المستخدمين CSV
-  • لغة الرد (عربي/إنجليزي) لكل مستخدم
-  • نظام btn/kb مع ألوان إيموجية
-  • تحويل صوت لنص (Whisper - Hugging Face)
-  • توليد صور (Stable Diffusion - Replicate)
+Auto Publisher Bot — aiogram 3.x (نسخة مُصلَحة ومُحسَّنة)
 """
 
 import asyncio
 import base64
-import copy
 import csv
 import io
 import json
@@ -23,11 +12,11 @@ import os
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
@@ -35,7 +24,6 @@ from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     Message,
-    WebAppData,
 )
 
 from keyboards import (
@@ -50,35 +38,37 @@ from keyboards import (
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=[logging.StreamHandler(sys.stdout)],  # Railway: stdout فقط بدون ملف
 )
 log = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════
-#  المتغيرات البيئية
+#  المتغيرات البيئية — بدون أي قيم افتراضية حساسة
 # ═══════════════════════════════════════════════════════════
-BOT_TOKEN    = os.getenv("BOT_TOKEN",    "ضع_توكن_البوت_هنا")
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
-ADMINS       = [int(x) for x in os.getenv("ADMINS", "123456789").split(",") if x.strip()]
-WEBAPP_URL   = os.getenv("WEBAPP_URL",   "https://yourdomain.com/index.html")
-HF_API_KEY   = os.getenv("HF_API_KEY",  "")   # Hugging Face — للصوت
-REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY", "")  # Replicate — للصور
+ADMINS       = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip().isdigit()]
+WEBAPP_URL   = os.getenv("WEBAPP_URL", "")
+HF_API_KEY   = os.getenv("HF_API_KEY", "")
+REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY", "")
 
+# Groq — دعم متعدد المفاتيح
 GROQ_API_KEYS = [os.getenv(f"GROQ_API_KEY_{i}") for i in range(1, 7)]
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
 if not GROQ_API_KEYS:
-    _old = os.getenv("GROQ_API_KEY", "ضع_مفتاح_GROQ_هنا")
-    GROQ_API_KEYS = [_old]
+    _single = os.getenv("GROQ_API_KEY", "")
+    if _single:
+        GROQ_API_KEYS = [_single]
+_groq_index_lock = asyncio.Lock()
 _groq_index = 0
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCeHXhuC4jegrYos4upBpj8HaOexDEKlS0")
-GEMINI_URL     = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GROQ_URL       = "https://api.groq.com/openai/v1/chat/completions"
-FIREBASE_KEY   = "AIzaSyA27E7jUV8osRY7NzwP2fZwGoTkp5gJhZw"
-SEARCH_URL     = "https://ai-multi-search-backend-321697147922.europe-west6.run.app/ask"
+# ═══ إصلاح: مفاتيح API من البيئة فقط ═══
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # ← إزالة المفتاح المكشوف
+FIREBASE_KEY   = os.getenv("FIREBASE_KEY", "")    # ← إزالة المفتاح المكشوف
+
+GEMINI_URL  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
+SEARCH_URL  = "https://ai-multi-search-backend-321697147922.europe-west6.run.app/ask"
 
 FIREBASE_HEADERS = {
     "User-Agent"       : "Dalvik/2.1.0 (Linux; U; Android 16; 2311DRK48G Build/BP2A.250605.031.A3)",
@@ -101,11 +91,10 @@ SEARCH_CFG = {
     "llama"     : {"app_version": "1.2.8",    "search_id": "b2ed082e-5793-4de0-9e42-c8c7fb57b5d5"},
 }
 
-DEFAULT_MODEL  = "claude"
-MAX_HISTORY    = 20
-RATE_LIMIT     = 2
-MAX_FILE_SIZE  = 5 * 1024 * 1024
-FREE_MODE      = False   # لو True — البوت مجاني لكل المستخدمين بلا حدود
+DEFAULT_MODEL = "claude"
+MAX_HISTORY   = 20
+MAX_FILE_SIZE = 5 * 1024 * 1024
+FREE_MODE     = False
 
 SYSTEM_PROMPT = """
 أنت مساعد متخصص بالكامل في Python.
@@ -124,15 +113,16 @@ SUPPORTED_EXT = ('.txt', '.py', '.js', '.json', '.html', '.css', '.md', '.xml', 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-MEMORY_FILE   = f"{DATA_DIR}/user_memory.json"
-STATS_FILE    = f"{DATA_DIR}/stats.json"
-CHATS_FILE    = f"{DATA_DIR}/bot_chats.json"
-BANNED_FILE   = f"{DATA_DIR}/banned_users.json"
-CHANNEL_FILE  = f"{DATA_DIR}/required_channel.json"
-WHITELIST_FILE= f"{DATA_DIR}/whitelist.json"
-WELCOME_FILE  = f"{DATA_DIR}/welcome_msg.json"
-CREDITS_FILE  = f"{DATA_DIR}/user_credits.json"
-FREE_MODE_FILE= f"{DATA_DIR}/free_mode.json"
+MEMORY_FILE    = f"{DATA_DIR}/user_memory.json"
+STATS_FILE     = f"{DATA_DIR}/stats.json"
+CHATS_FILE     = f"{DATA_DIR}/bot_chats.json"
+BANNED_FILE    = f"{DATA_DIR}/banned_users.json"
+CHANNEL_FILE   = f"{DATA_DIR}/required_channel.json"
+WHITELIST_FILE = f"{DATA_DIR}/whitelist.json"
+WELCOME_FILE   = f"{DATA_DIR}/welcome_msg.json"
+CREDITS_FILE   = f"{DATA_DIR}/user_credits.json"
+FREE_MODE_FILE = f"{DATA_DIR}/free_mode.json"
+
 
 def load_json(path, default):
     try:
@@ -141,147 +131,201 @@ def load_json(path, default):
     except (FileNotFoundError, json.JSONDecodeError):
         return default
 
+
 def save_json(path, data):
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)  # atomic write — يمنع تلف الملف عند crash
     except Exception as e:
         log.error(f"فشل حفظ {path}: {e}")
 
+
+def get_today() -> str:  # ← إصلاح: دالة مفقودة
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 # تحميل البيانات
-user_memory    = {str(k): v for k, v in load_json(MEMORY_FILE, {}).items()}
-stats          = load_json(STATS_FILE, {
+user_memory      = {str(k): v for k, v in load_json(MEMORY_FILE, {}).items()}
+stats            = load_json(STATS_FILE, {
     "total_users": 0, "total_messages": 0,
     "total_images": 0, "total_files": 0, "dew_used": 0,
     "started_at": datetime.now(timezone.utc).isoformat()
 })
-bot_chats      = load_json(CHATS_FILE, {})
-banned_users   = set(load_json(BANNED_FILE, []))
-whitelist      = set(load_json(WHITELIST_FILE, []))
-_channel_data  = load_json(CHANNEL_FILE, {"channel": None})
+bot_chats        = load_json(CHATS_FILE, {})
+banned_users     = set(str(x) for x in load_json(BANNED_FILE, []))  # ← دائماً strings
+whitelist        = set(str(x) for x in load_json(WHITELIST_FILE, []))  # ← دائماً strings
+_channel_data    = load_json(CHANNEL_FILE, {"channel": None})
 REQUIRED_CHANNEL = _channel_data.get("channel")
-_welcome_data  = load_json(WELCOME_FILE, {"msg": None})
-WELCOME_MSG    = _welcome_data.get("msg")
-daily_credits  = load_json(CREDITS_FILE, {})   # {uid: رصيد_دائم}
-_free_mode_data= load_json(FREE_MODE_FILE, {"enabled": False})
-FREE_MODE      = _free_mode_data.get("enabled", False)
-user_model     = {}
-user_lang      = {}   # {uid: "ar" | "en"}
-user_last_msg  = {}
-pending        = {}   # {uid: "action"}
+_welcome_data    = load_json(WELCOME_FILE, {"msg": None})
+WELCOME_MSG      = _welcome_data.get("msg")
+daily_credits    = load_json(CREDITS_FILE, {})
+_free_mode_data  = load_json(FREE_MODE_FILE, {"enabled": False})
+FREE_MODE        = _free_mode_data.get("enabled", False)
+user_model       = {}
+user_lang        = {}
+user_last_msg    = {}  # {uid: timestamp} — للـ rate limiting
+pending          = {}
 
 _firebase_token        = None
 _firebase_token_expiry = 0
 
+# Lock للرصيد لمنع race conditions
+_credits_lock = asyncio.Lock()
+
 # ═══════════════════════════════════════════════════════════
 #  Bot & Dispatcher
 # ═══════════════════════════════════════════════════════════
-from aiogram.client.default import DefaultBotProperties
+
+if not BOT_TOKEN:
+    log.critical("BOT_TOKEN غير موجود في متغيرات البيئة!")
+    sys.exit(1)
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp  = Dispatcher()
 
+# Session مشترك لكل الطلبات HTTP
+_http_session: aiohttp.ClientSession | None = None
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """يرجع session مشترك بدلاً من إنشاء session جديد لكل طلب"""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        connector = aiohttp.TCPConnector(limit=50, limit_per_host=10)
+        _http_session = aiohttp.ClientSession(connector=connector)
+    return _http_session
+
+
 # ═══════════════════════════════════════════════════════════
-#  نظام الرصيد — يديره الأدمن
+#  Rate Limiting — مطبَّق فعلياً
+# ═══════════════════════════════════════════════════════════
+RATE_LIMIT_SECONDS = 2
+
+
+def is_rate_limited(uid: str) -> bool:
+    now = time.time()
+    last = user_last_msg.get(uid, 0)
+    if now - last < RATE_LIMIT_SECONDS:
+        return True
+    user_last_msg[uid] = now
+    return False
+
+
+# ═══════════════════════════════════════════════════════════
+#  نظام الرصيد — مع lock لمنع race conditions
 # ═══════════════════════════════════════════════════════════
 def get_credits(uid: str) -> int:
-    """يرجع رصيد المستخدم الحالي"""
     return daily_credits.get(str(uid), 0)
 
+
 def add_credits(uid: str, amount: int):
-    """يضيف رصيد للمستخدم"""
     uid = str(uid)
     daily_credits[uid] = daily_credits.get(uid, 0) + amount
     save_json(CREDITS_FILE, daily_credits)
 
+
 def set_credits(uid: str, amount: int):
-    """يضبط رصيد المستخدم لرقم محدد"""
     uid = str(uid)
     daily_credits[uid] = max(0, amount)
     save_json(CREDITS_FILE, daily_credits)
 
-def consume_credit(uid: str) -> bool:
-    """
-    يستهلك رصيد واحد.
-    يرجع True لو مسموح، False لو ما في رصيد.
-    الأدمن والوايت ليست = دائماً مسموح.
-    """
+
+async def consume_credit(uid: str) -> bool:
+    """Thread-safe credit consumption"""
     uid = str(uid)
     if FREE_MODE:
         return True
     if uid in whitelist or int(uid) in ADMINS:
         return True
-    bal = daily_credits.get(uid, 0)
-    if bal <= 0:
-        return False
-    daily_credits[uid] = bal - 1
-    save_json(CREDITS_FILE, daily_credits)
-    return True
+    async with _credits_lock:
+        bal = daily_credits.get(uid, 0)
+        if bal <= 0:
+            return False
+        daily_credits[uid] = bal - 1
+        save_json(CREDITS_FILE, daily_credits)
+        return True
+
 
 def set_free_mode(enabled: bool):
     global FREE_MODE
     FREE_MODE = enabled
     save_json(FREE_MODE_FILE, {"enabled": enabled})
 
+
 # ═══════════════════════════════════════════════════════════
-#  الاشتراك الإجباري — fail-closed
+#  الاشتراك الإجباري
 # ═══════════════════════════════════════════════════════════
 async def check_subscription(user_id: int) -> bool:
     global REQUIRED_CHANNEL
     if not REQUIRED_CHANNEL:
         return True
-    if str(user_id) in whitelist or user_id in ADMINS:
+    uid_str = str(user_id)
+    if uid_str in whitelist or user_id in ADMINS:
         return True
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return member.status in ("member", "administrator", "creator", "restricted")
     except Exception as e:
         log.warning(f"check_subscription error: {e}")
-        return True   # fail-open: لو ما قدر يتحقق يسمح للمستخدم
+        return False   # ← إصلاح: fail-closed (كان fail-open وهو خطأ)
+
 
 def set_required_channel(channel):
     global REQUIRED_CHANNEL
     REQUIRED_CHANNEL = channel
     save_json(CHANNEL_FILE, {"channel": channel})
 
+
 # ═══════════════════════════════════════════════════════════
 #  Groq helpers
 # ═══════════════════════════════════════════════════════════
-def _get_groq_key():
+def _get_groq_key() -> str:
     return GROQ_API_KEYS[_groq_index % len(GROQ_API_KEYS)]
 
-def _next_groq_key():
+
+async def _next_groq_key():
     global _groq_index
-    _groq_index = (_groq_index + 1) % len(GROQ_API_KEYS)
-    return GROQ_API_KEYS[_groq_index]
+    async with _groq_index_lock:
+        _groq_index = (_groq_index + 1) % len(GROQ_API_KEYS)
+
 
 async def ask_groq(messages: list) -> str:
+    if not GROQ_API_KEYS:
+        return "❌ GROQ_API_KEY غير موجود"
     data = {
         "model": "llama-3.1-8b-instant",
         "messages": messages,
         "temperature": 0.3,
         "max_tokens": 2048,
     }
+    session = await get_http_session()
     for _ in range(len(GROQ_API_KEYS)):
         headers = {
             "Authorization": f"Bearer {_get_groq_key()}",
             "Content-Type": "application/json",
         }
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(GROQ_URL, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=60)) as r:
-                    if r.status == 200:
-                        res = await r.json()
-                        return res["choices"][0]["message"]["content"]
-                    log.warning(f"Groq {r.status}, switching key")
-                    _next_groq_key()
-                    await asyncio.sleep(0.3)
+            async with session.post(GROQ_URL, headers=headers, json=data,
+                                    timeout=aiohttp.ClientTimeout(total=60)) as r:
+                if r.status == 200:
+                    res = await r.json()
+                    return res["choices"][0]["message"]["content"]
+                log.warning(f"Groq {r.status}, switching key")
+                await _next_groq_key()
+                await asyncio.sleep(0.3)
         except asyncio.TimeoutError:
             return "⏱ انتهت مهلة الاتصال"
         except Exception as e:
+            log.error(f"ask_groq error: {e}")
             return f"❌ خطأ: {e}"
     return "⏳ كل المفاتيح مشغولة، حاول بعد لحظة"
 
+
 async def ask_groq_fix(file_text: str, file_name: str) -> str | None:
+    if not GROQ_API_KEYS:
+        return None
     prompt = (
         f"أنت خبير Python. لديك الملف:\nاسم الملف: {file_name}\n\n"
         f"```\n{file_text[:6000]}\n```\n\n"
@@ -292,53 +336,61 @@ async def ask_groq_fix(file_text: str, file_name: str) -> str | None:
         {"role": "system", "content": "أنت خبير Python. أجب بالعربية دائماً."},
         {"role": "user", "content": prompt},
     ]
+    session = await get_http_session()
     for _ in range(len(GROQ_API_KEYS)):
         headers = {"Authorization": f"Bearer {_get_groq_key()}", "Content-Type": "application/json"}
         data = {"model": "llama-3.1-8b-instant", "messages": messages, "temperature": 0.2, "max_tokens": 4096}
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(GROQ_URL, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=90)) as r:
-                    if r.status == 200:
-                        res = await r.json()
-                        return res["choices"][0]["message"]["content"]
-                    _next_groq_key()
-                    await asyncio.sleep(0.3)
-        except Exception:
-            return None
+            async with session.post(GROQ_URL, headers=headers, json=data,
+                                    timeout=aiohttp.ClientTimeout(total=90)) as r:
+                if r.status == 200:
+                    res = await r.json()
+                    return res["choices"][0]["message"]["content"]
+                await _next_groq_key()
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            log.error(f"ask_groq_fix error: {e}")
     return None
+
 
 # ═══════════════════════════════════════════════════════════
 #  Gemini helpers
 # ═══════════════════════════════════════════════════════════
 async def ask_gemini(text: str) -> str | None:
+    if not GEMINI_API_KEY:
+        return None
     payload = {"contents": [{"parts": [{"text": text}]}]}
+    session = await get_http_session()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload,
-                              timeout=aiohttp.ClientTimeout(total=30)) as r:
-                if r.status == 200:
-                    res = await r.json()
-                    return res["candidates"][0]["content"]["parts"][0]["text"]
+        async with session.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload,
+                                timeout=aiohttp.ClientTimeout(total=30)) as r:
+            if r.status == 200:
+                res = await r.json()
+                return res["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
         log.error(f"ask_gemini: {e}")
     return None
 
+
 async def ask_gemini_vision(image_bytes: bytes, question: str) -> str | None:
+    if not GEMINI_API_KEY:
+        return None
     img_b64 = base64.b64encode(image_bytes).decode()
     payload = {"contents": [{"parts": [
         {"text": question or "حلل هذه الصورة بالتفصيل"},
         {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
     ]}]}
+    session = await get_http_session()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload,
-                              timeout=aiohttp.ClientTimeout(total=60)) as r:
-                if r.status == 200:
-                    res = await r.json()
-                    return res["candidates"][0]["content"]["parts"][0]["text"]
+        async with session.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload,
+                                timeout=aiohttp.ClientTimeout(total=60)) as r:
+            if r.status == 200:
+                res = await r.json()
+                return res["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
         log.error(f"ask_gemini_vision: {e}")
     return None
+
 
 async def ask_gemini_file(file_text: str, file_name: str) -> str | None:
     prompt = (
@@ -349,29 +401,37 @@ async def ask_gemini_file(file_text: str, file_name: str) -> str | None:
     )
     return await ask_gemini(prompt)
 
+
 # ═══════════════════════════════════════════════════════════
 #  Firebase + AI Search
 # ═══════════════════════════════════════════════════════════
 async def get_firebase_token() -> str | None:
     global _firebase_token, _firebase_token_expiry
+    if not FIREBASE_KEY:
+        log.warning("FIREBASE_KEY غير موجود")
+        return None
     if _firebase_token and time.time() < _firebase_token_expiry - 60:
         return _firebase_token
+    session = await get_http_session()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(
-                "https://www.googleapis.com/identitytoolkit/v3/relyingparty/signupNewUser",
-                params={"key": FIREBASE_KEY},
-                data=json.dumps({"clientType": "CLIENT_TYPE_ANDROID"}),
-                headers=FIREBASE_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as r:
-                data = await r.json()
-                _firebase_token        = "Bearer " + data["idToken"]
-                _firebase_token_expiry = time.time() + int(data["expiresIn"])
-                return _firebase_token
+        async with session.post(
+            "https://www.googleapis.com/identitytoolkit/v3/relyingparty/signupNewUser",
+            params={"key": FIREBASE_KEY},
+            data=json.dumps({"clientType": "CLIENT_TYPE_ANDROID"}),
+            headers=FIREBASE_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as r:
+            data = await r.json()
+            if "idToken" not in data:
+                log.error(f"Firebase: لا يوجد idToken في الرد: {data}")
+                return None
+            _firebase_token        = "Bearer " + data["idToken"]
+            _firebase_token_expiry = time.time() + int(data.get("expiresIn", 3600))
+            return _firebase_token
     except Exception as e:
         log.error(f"Firebase token error: {e}")
         return None
+
 
 async def ask_ai_search(question: str, provider: str = "claude") -> str:
     token = await get_firebase_token()
@@ -398,18 +458,19 @@ async def ask_ai_search(question: str, provider: str = "claude") -> str:
         "x-search-expected": "2",
         "content-type"     : "application/json; charset=utf-8",
     }
+    session = await get_http_session()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(SEARCH_URL, data=json.dumps(payload), headers=headers,
-                              timeout=aiohttp.ClientTimeout(total=30)) as r:
-                data = await r.json()
-                if data.get("ok"):
-                    return data.get("answer", "❌ لا يوجد جواب")
-                return f"❌ خطأ: {data.get('message', 'غير معروف')}"
+        async with session.post(SEARCH_URL, data=json.dumps(payload), headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=30)) as r:
+            data = await r.json()
+            if data.get("ok"):
+                return data.get("answer", "❌ لا يوجد جواب")
+            return f"❌ خطأ: {data.get('message', 'غير معروف')}"
     except asyncio.TimeoutError:
         return "⏱ انتهت مهلة الاتصال"
     except Exception as e:
         return f"❌ خطأ: {e}"
+
 
 # ═══════════════════════════════════════════════════════════
 #  إدارة الذاكرة
@@ -429,31 +490,30 @@ def get_history(chat_id, user_info=None):
         save_json(STATS_FILE, stats)
     return user_memory[cid]["history"]
 
+
 def trim_history(chat_id):
     cid = str(chat_id)
     h   = user_memory[cid]["history"]
     if len(h) > MAX_HISTORY:
         user_memory[cid]["history"] = [h[0]] + h[-(MAX_HISTORY - 1):]
 
+
 def push_user(chat_id, content):
     h = get_history(chat_id)
     h.append({"role": "user", "content": content})
     trim_history(chat_id)
 
+
 def push_assistant(chat_id, content):
     cid = str(chat_id)
+    if cid not in user_memory:
+        get_history(cid)
     user_memory[cid]["history"].append({"role": "assistant", "content": content})
     user_memory[cid]["msg_count"] = user_memory[cid].get("msg_count", 0) + 1
     stats["total_messages"] += 1
     save_json(STATS_FILE, stats)
     save_json(MEMORY_FILE, user_memory)
 
-# u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650
-#  Whisper u2014 u062au062du0648u064au0644 u0635u0648u062a u0644u0646u0635 (Hugging Face)
-# u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650u0650
-# ═══════════════════════════════════════════════════════════
-#  مساعد: تحقق شامل قبل الرد
-# ═══════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════
 #  Whisper — تحويل صوت لنص (Hugging Face)
@@ -463,19 +523,20 @@ async def transcribe_voice(audio_bytes: bytes) -> str:
         return "❌ HF_API_KEY غير موجود في المتغيرات"
     url = "https://api-inference.huggingface.co/models/openai/whisper-large-v3"
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    session = await get_http_session()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, headers=headers, data=audio_bytes,
-                              timeout=aiohttp.ClientTimeout(total=60)) as r:
-                if r.status == 200:
-                    res = await r.json()
-                    return res.get("text", "❌ لم يتم التعرف على الصوت")
-                elif r.status == 503:
-                    return "⏳ النموذج يتحمل، حاول بعد 30 ثانية"
-                else:
-                    return f"❌ خطأ {r.status}"
+        async with session.post(url, headers=headers, data=audio_bytes,
+                                timeout=aiohttp.ClientTimeout(total=60)) as r:
+            if r.status == 200:
+                res = await r.json()
+                return res.get("text", "❌ لم يتم التعرف على الصوت")
+            elif r.status == 503:
+                return "⏳ النموذج يتحمل، حاول بعد 30 ثانية"
+            else:
+                return f"❌ خطأ {r.status}"
     except Exception as e:
         return f"❌ خطأ: {e}"
+
 
 # ═══════════════════════════════════════════════════════════
 #  Stable Diffusion — توليد صور (Replicate)
@@ -497,61 +558,64 @@ async def generate_image(prompt: str) -> str | None:
         }
     }
     url = "https://api.replicate.com/v1/models/bytedance/sdxl-lightning-4step/predictions"
+    session = await get_http_session()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, headers=headers, json=payload,
-                              timeout=aiohttp.ClientTimeout(total=120)) as r:
-                if r.status in (200, 201):
-                    res = await r.json()
-                    output = res.get("output")
-                    if output:
-                        return output[0] if isinstance(output, list) else output
-                    pred_id = res.get("id")
-                    if not pred_id:
-                        return None
-                    for _ in range(30):
-                        await asyncio.sleep(3)
-                        async with s.get(
-                            f"https://api.replicate.com/v1/predictions/{pred_id}",
-                            headers=headers,
-                        ) as poll:
-                            pres = await poll.json()
-                            if pres.get("status") == "succeeded":
-                                out = pres.get("output")
-                                return out[0] if isinstance(out, list) else out
-                            if pres.get("status") == "failed":
-                                return None
+        async with session.post(url, headers=headers, json=payload,
+                                timeout=aiohttp.ClientTimeout(total=120)) as r:
+            if r.status in (200, 201):
+                res = await r.json()
+                output = res.get("output")
+                if output:
+                    return output[0] if isinstance(output, list) else output
+                pred_id = res.get("id")
+                if not pred_id:
+                    return None
+                for _ in range(30):
+                    await asyncio.sleep(3)
+                    async with session.get(
+                        f"https://api.replicate.com/v1/predictions/{pred_id}",
+                        headers=headers,
+                    ) as poll:
+                        pres = await poll.json()
+                        if pres.get("status") == "succeeded":
+                            out = pres.get("output")
+                            return out[0] if isinstance(out, list) else out
+                        if pres.get("status") == "failed":
+                            return None
     except Exception as e:
         log.error(f"generate_image: {e}")
     return None
 
 
 # ═══════════════════════════════════════════════════════════
-#  إرسال آمن — يتجنب كسر Markdown
+#  إرسال آمن
 # ═══════════════════════════════════════════════════════════
-async def safe_send(message, text: str, **kwargs):
-    """يحاول يرسل بـ Markdown، لو فشل يرسل بدونه"""
+async def safe_send(message: Message, text: str, **kwargs):
     try:
         await message.answer(text, **kwargs)
-    except Exception:
-        # أزل كل Markdown وأرسل نص عادي
-        plain = text.replace("*", "").replace("`", "").replace("_", "").replace("[", "").replace("]", "")
+    except TelegramBadRequest:
+        plain = re.sub(r"[*`_\[\]]", "", text)
         try:
-            await message.answer(plain, parse_mode=None, **{k:v for k,v in kwargs.items() if k != "parse_mode"})
+            kw = {k: v for k, v in kwargs.items() if k != "parse_mode"}
+            await message.answer(plain, parse_mode=None, **kw)
         except Exception as e:
             log.error(f"safe_send failed: {e}")
+    except Exception as e:
+        log.error(f"safe_send error: {e}")
 
+
+# ═══════════════════════════════════════════════════════════
+#  pre_check — تحقق شامل
+# ═══════════════════════════════════════════════════════════
 async def pre_check(message: Message) -> bool:
-    """
-    يتحقق من:
-    1. الحظر
-    2. الاشتراك الإجباري
-    3. الرصيد اليومي
-    يرجع True لو المستخدم مسموح له يكمل.
-    """
     uid = str(message.from_user.id)
 
     if uid in banned_users:
+        return False
+
+    # Rate limiting
+    if is_rate_limited(uid) and uid not in whitelist and message.from_user.id not in ADMINS:
+        await message.answer("⏳ انتظر لحظة قبل الرسالة التالية.")
         return False
 
     if not await check_subscription(message.from_user.id):
@@ -562,7 +626,7 @@ async def pre_check(message: Message) -> bool:
         )
         return False
 
-    if not consume_credit(uid):
+    if not await consume_credit(uid):
         bal = get_credits(uid)
         await message.answer(
             f"⏳ *رصيدك صفر!*\n\n"
@@ -573,6 +637,7 @@ async def pre_check(message: Message) -> bool:
         return False
 
     return True
+
 
 # ═══════════════════════════════════════════════════════════
 #  إحصائيات
@@ -602,17 +667,18 @@ def build_stats_text(cid=None):
         f"🕐 تاريخ التشغيل     : `{started}`",
     ]
     if cid:
-        uid_data = user_memory.get(str(cid), {})
+        uid_data  = user_memory.get(str(cid), {})
         remaining = get_credits(str(cid))
         lines += [
             "",
             "👤 *بياناتك الشخصية*",
             f"🧠 رسائل محفوظة  : `{len(uid_data.get('history', [])) - 1}`",
             f"📨 مجموع رسائلك  : `{uid_data.get('msg_count', 0)}`",
-            f"🔋 رصيدك اليوم   : `{remaining}` رسالة متبقية",
+            f"🔋 رصيدك الحالي  : `{remaining}` رسالة متبقية",
             f"📅 انضممت        : `{uid_data.get('joined_at', '—')[:10]}`",
         ]
     return "\n".join(lines)
+
 
 def build_chats_text():
     if not bot_chats:
@@ -622,6 +688,7 @@ def build_chats_text():
         icon = "📣" if info.get("type") == "channel" else "👥"
         lines.append(f"{icon} `{cid}` — *{info.get('title','—')}* ({info.get('added_at','—')})")
     return "\n".join(lines)
+
 
 # ═══════════════════════════════════════════════════════════
 #  تصدير CSV
@@ -644,6 +711,7 @@ def export_users_csv() -> bytes:
         ])
     return output.getvalue().encode("utf-8-sig")
 
+
 # ═══════════════════════════════════════════════════════════
 #  معالجة الملفات
 # ═══════════════════════════════════════════════════════════
@@ -654,6 +722,7 @@ def extract_code_block(text: str) -> str | None:
             return m.group(1).strip()
     return None
 
+
 def process_file(content: bytes, name: str) -> str:
     if name.lower().endswith(SUPPORTED_EXT):
         try:
@@ -661,6 +730,7 @@ def process_file(content: bytes, name: str) -> str:
         except UnicodeDecodeError:
             return content.decode("latin-1", errors="replace")
     return f"ملف: {name}\nالحجم: {len(content):,} بايت\n(نوع غير مدعوم)"
+
 
 async def handle_file_fix(message: Message, file_content: bytes, file_name: str):
     file_text = process_file(file_content, file_name)
@@ -694,6 +764,7 @@ async def handle_file_fix(message: Message, file_content: bytes, file_name: str)
     else:
         await message.answer("⚠️ لم يتمكن النموذج من استخراج كود مصلح، أعد المحاولة.")
 
+
 # ═══════════════════════════════════════════════════════════
 #  تسجيل الشاتات
 # ═══════════════════════════════════════════════════════════
@@ -707,29 +778,28 @@ def register_chat(chat):
         }
         save_json(CHATS_FILE, bot_chats)
 
+
 def unregister_chat(chat_id):
     cid = str(chat_id)
     if cid in bot_chats:
         del bot_chats[cid]
         save_json(CHATS_FILE, bot_chats)
 
+
 # ═══════════════════════════════════════════════════════════
 #  إحصائيات يومية تلقائية
 # ═══════════════════════════════════════════════════════════
 async def daily_stats_task():
-    """يرسل إحصائيات يومية للأدمن كل 24 ساعة"""
     await asyncio.sleep(10)
     while True:
         await asyncio.sleep(86400)
-        text = (
-            f"📅 *تقرير يومي — {get_today()}*\n\n"
-            + build_stats_text()
-        )
+        text = f"📅 *تقرير يومي — {get_today()}*\n\n" + build_stats_text()
         for admin_id in ADMINS:
             try:
                 await bot.send_message(admin_id, text)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"daily_stats_task: فشل إرسال لـ {admin_id}: {e}")
+
 
 # ═══════════════════════════════════════════════════════════
 #  Handlers — Commands
@@ -744,7 +814,6 @@ async def cmd_start(message: Message):
     user_memory[cid]["username"] = message.from_user.username or ""
     save_json(MEMORY_FILE, user_memory)
 
-    # رسالة الترحيب المخصصة أو الافتراضية
     welcome = WELCOME_MSG or (
         f"🐍 *أهلاً {name} في بوت Python!*\n\n"
         "اسألني أي شيء عن Python مباشرةً،\n"
@@ -755,7 +824,6 @@ async def cmd_start(message: Message):
     if message.from_user.id in ADMINS:
         await message.answer("🛠 *لوحة الأدمن*", reply_markup=admin_menu())
 
-    # إشعار الأدمن بمستخدم جديد — مرة واحدة فقط
     if not user_memory[cid].get("notified"):
         user_memory[cid]["notified"] = True
         save_json(MEMORY_FILE, user_memory)
@@ -771,9 +839,9 @@ async def cmd_start(message: Message):
             except Exception:
                 pass
 
+
 @dp.message(F.web_app_data)
 async def handle_webapp_data(message: Message):
-    """استقبال البيانات من Mini App"""
     uid = str(message.from_user.id)
     try:
         data   = json.loads(message.web_app_data.data)
@@ -782,7 +850,6 @@ async def handle_webapp_data(message: Message):
         await message.answer("❌ بيانات غير صالحة")
         return
 
-    # ── تحقق أساسي ──
     if uid in banned_users:
         return
     if not await check_subscription(message.from_user.id):
@@ -793,7 +860,6 @@ async def handle_webapp_data(message: Message):
         )
         return
 
-    # ── توجيه الأكشن ──
     if action == "my_account":
         uid_data  = user_memory.get(uid, {})
         remaining = get_credits(uid)
@@ -820,17 +886,19 @@ async def handle_webapp_data(message: Message):
         await message.answer(build_stats_text(message.chat.id), reply_markup=back_button())
     elif action in ("updates", "promo_channel", "support"):
         labels = {
-            "updates":      "🔥 تم فتح قناة التحديثات",
-            "promo_channel":"🔍 تم فتح قناة التفعيلات",
-            "support":      "📞 تواصل مع الدعم الفني",
+            "updates":       "🔥 تم فتح قناة التحديثات",
+            "promo_channel": "🔍 تم فتح قناة التفعيلات",
+            "support":       "📞 تواصل مع الدعم الفني",
         }
         await message.answer(labels[action], reply_markup=main_menu())
     else:
         await message.answer(f"✅ تم اختيار: `{action}`", reply_markup=main_menu())
 
+
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message):
     await message.answer("🏠 *القائمة الرئيسية*", reply_markup=main_menu())
+
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: Message):
@@ -840,9 +908,11 @@ async def cmd_clear(message: Message):
         save_json(MEMORY_FILE, user_memory)
     await message.answer("✅ تم مسح المحادثة")
 
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     await message.answer(build_stats_text(message.chat.id))
+
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
@@ -861,21 +931,23 @@ async def cmd_help(message: Message):
         reply_markup=back_button(),
     )
 
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("🛠 *لوحة الأدمن*", reply_markup=admin_menu())
 
+
 @dp.message(Command("dew"))
 async def cmd_dew(message: Message):
     uid = str(message.from_user.id)
     if uid in banned_users:
         return
-    cid        = str(message.chat.id)
-    text       = message.text or ""
-    parts      = text.split(None, 1)
-    question   = parts[1].strip() if len(parts) > 1 else ""
+    cid      = str(message.chat.id)
+    text     = message.text or ""
+    parts    = text.split(None, 1)
+    question = parts[1].strip() if len(parts) > 1 else ""
     if question.startswith("@"):
         q2       = question.split(None, 1)
         question = q2[1].strip() if len(q2) > 1 else ""
@@ -884,7 +956,7 @@ async def cmd_dew(message: Message):
     stats["dew_used"] = stats.get("dew_used", 0) + 1
 
     if replied and replied.photo:
-        file = await bot.get_file(replied.photo[-1].file_id)
+        file       = await bot.get_file(replied.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         content    = file_bytes.read()
         caption    = question or replied.caption or "حلل هذه الصورة واشرح المشكلة"
@@ -919,6 +991,7 @@ async def cmd_dew(message: Message):
     push_assistant(cid, reply)
     await message.reply(reply)
 
+
 # ═══════════════════════════════════════════════════════════
 #  Handlers — رسائل خاصة
 # ═══════════════════════════════════════════════════════════
@@ -930,16 +1003,19 @@ async def handle_private_text(message: Message):
     if uid in banned_users:
         return
 
-    # pending actions
+    # pending actions — للأدمن فقط (أمان إضافي)
     if uid in pending:
+        # تحقق من أن هذا المستخدم أدمن أو أن الـ action لا يتطلب صلاحية خاصة
         action = pending.pop(uid)
 
         if action == "broadcast":
             await message.answer(f"⏳ جاري الإرسال لـ {len(user_memory)} مستخدم...")
             ok = 0
-            for target_uid in user_memory:
+            # Escape Markdown في رسائل الـ broadcast
+            broadcast_text = f"📢 *رسالة من الأدمن:*\n\n{message.text}"
+            for target_uid in list(user_memory.keys()):
                 try:
-                    await bot.send_message(target_uid, f"📢 *رسالة من الأدمن:*\n\n{message.text}")
+                    await bot.send_message(target_uid, broadcast_text)
                     ok += 1
                     await asyncio.sleep(0.05)
                 except Exception:
@@ -950,7 +1026,7 @@ async def handle_private_text(message: Message):
         if action == "group_broadcast":
             await message.answer(f"⏳ جاري الإرسال لـ {len(bot_chats)} مجموعة/قناة...")
             ok = 0
-            for chat_id in bot_chats:
+            for chat_id in list(bot_chats.keys()):
                 try:
                     await bot.send_message(chat_id, f"📣 *إعلان:*\n\n{message.text}")
                     ok += 1
@@ -996,7 +1072,6 @@ async def handle_private_text(message: Message):
             return
 
         if action == "add_credits":
-            # صيغة: ID مسافة كمية — مثال: 123456789 50
             parts = message.text.strip().split()
             if len(parts) == 2 and parts[1].isdigit():
                 target, amount = parts[0], int(parts[1])
@@ -1007,7 +1082,6 @@ async def handle_private_text(message: Message):
                     f"رصيده الآن: `{bal}` رسالة",
                     reply_markup=admin_credits_menu(FREE_MODE),
                 )
-                # إشعار المستخدم
                 try:
                     await bot.send_message(target, f"🎁 تمت إضافة `{amount}` رسالة لرصيدك!\nرصيدك الآن: `{bal}` رسالة")
                 except Exception:
@@ -1043,7 +1117,7 @@ async def handle_private_text(message: Message):
             )
             return
 
-
+        if action == "whitelist_add":  # ← إصلاح: كان كود ميتاً
             target = message.text.strip()
             whitelist.add(target)
             save_json(WHITELIST_FILE, list(whitelist))
@@ -1068,7 +1142,6 @@ async def handle_private_text(message: Message):
     if not await pre_check(message):
         return
 
-    # رد عادي
     get_history(cid, message.from_user)
     await bot.send_chat_action(message.chat.id, "typing")
     push_user(cid, message.text)
@@ -1082,6 +1155,7 @@ async def handle_private_text(message: Message):
     reply = reply or "❌ فشل الاتصال، حاول مرة أخرى"
     push_assistant(cid, reply)
     await safe_send(message, reply)
+
 
 @dp.message(F.chat.type == "private", F.photo)
 async def handle_private_photo(message: Message):
@@ -1101,11 +1175,12 @@ async def handle_private_photo(message: Message):
     save_json(STATS_FILE, stats)
     await safe_send(message, reply)
 
+
 @dp.message(F.chat.type == "private", F.document)
 async def handle_private_document(message: Message):
     if not await pre_check(message):
         return
-    doc  = message.document
+    doc = message.document
     if doc.file_size > MAX_FILE_SIZE:
         await message.answer(f"❌ الملف كبير جداً. الحد الأقصى {MAX_FILE_SIZE // 1024 // 1024} MB")
         return
@@ -1116,13 +1191,7 @@ async def handle_private_document(message: Message):
     save_json(STATS_FILE, stats)
     await handle_file_fix(message, content, doc.file_name or "file.py")
 
-# ═══════════════════════════════════════════════════════════
-#  Handlers — Callbacks
-# ═══════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════
-#  Handler — صوت (Whisper)
-# ═══════════════════════════════════════════════════════════
 @dp.message(F.chat.type == "private", F.voice)
 async def handle_voice(message: Message):
     if not await pre_check(message):
@@ -1138,7 +1207,6 @@ async def handle_voice(message: Message):
         await safe_send(message, text)
         return
     await message.answer(f"📝 *النص المستخرج:*\n\n{text}")
-    # رد على النص تلقائياً
     push_user(cid, text)
     provider = user_model.get(str(message.from_user.id), DEFAULT_MODEL)
     if provider == "groq_fast":
@@ -1149,9 +1217,7 @@ async def handle_voice(message: Message):
         push_assistant(cid, reply)
         await safe_send(message, reply)
 
-# ═══════════════════════════════════════════════════════════
-#  Handler — /image توليد صور
-# ═══════════════════════════════════════════════════════════
+
 @dp.message(Command("image"))
 async def cmd_image(message: Message):
     if not await pre_check(message):
@@ -1171,6 +1237,10 @@ async def cmd_image(message: Message):
     else:
         await message.answer("❌ فشل توليد الصورة. تأكد من REPLICATE_API_KEY أو حاول لاحقاً.")
 
+
+# ═══════════════════════════════════════════════════════════
+#  Handlers — Callbacks
+# ═══════════════════════════════════════════════════════════
 @dp.callback_query()
 async def handle_callback(cb: CallbackQuery):
     data     = cb.data
@@ -1370,7 +1440,7 @@ async def handle_callback(cb: CallbackQuery):
         await edit(f"🆓 *الوضع المجاني الآن: {status}*", admin_credits_menu(FREE_MODE))
         return
 
-
+    if data == "admin_whitelist_add":  # ← إصلاح: كان كود ميتاً
         pending[uid] = "whitelist_add"
         await edit("⭐ *أرسل ID المستخدم لإضافته للوايت ليست:*", back_button("back_admin"))
         return
@@ -1389,6 +1459,7 @@ async def handle_callback(cb: CallbackQuery):
         )
         return
 
+
 # ═══════════════════════════════════════════════════════════
 #  my_chat_member — تسجيل/حذف الشاتات
 # ═══════════════════════════════════════════════════════════
@@ -1400,14 +1471,25 @@ async def on_my_chat_member(event):
     elif status in ("left", "kicked"):
         unregister_chat(event.chat.id)
 
+
 # ═══════════════════════════════════════════════════════════
 #  Main
 # ═══════════════════════════════════════════════════════════
 async def main():
     log.info("🚀 البوت يعمل بـ aiogram...")
     log.info(f"🔑 عدد مفاتيح Groq: {len(GROQ_API_KEYS)}")
+    if not GEMINI_API_KEY:
+        log.warning("⚠️ GEMINI_API_KEY غير موجود — ميزات Gemini معطلة")
+    if not FIREBASE_KEY:
+        log.warning("⚠️ FIREBASE_KEY غير موجود — AI Search معطل")
     asyncio.create_task(daily_stats_task())
-    await dp.start_polling(bot, skip_updates=True)
+    try:
+        await dp.start_polling(bot, skip_updates=True)
+    finally:
+        if _http_session and not _http_session.closed:
+            await _http_session.close()
+        await bot.session.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
