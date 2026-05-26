@@ -233,10 +233,10 @@ async def check_subscription(user_id: int) -> bool:
         return True
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
-        return member.status in ("member", "administrator", "creator")
+        return member.status in ("member", "administrator", "creator", "restricted")
     except Exception as e:
         log.warning(f"check_subscription error: {e}")
-        return False   # fail-closed
+        return True   # fail-open: لو ما قدر يتحقق يسمح للمستخدم
 
 def set_required_channel(channel):
     global REQUIRED_CHANNEL
@@ -539,9 +539,10 @@ async def pre_check(message: Message) -> bool:
         return False
 
     if not await check_subscription(message.from_user.id):
+        ch = REQUIRED_CHANNEL or "القناة"
         await message.answer(
-            "⚠️ *يجب الاشتراك في قناتنا أولاً!*\n\nاشترك ثم اضغط ✅ تحققت.",
-            reply_markup=subscription_required_keyboard(REQUIRED_CHANNEL),
+            f"⚠️ *يجب الاشتراك في {ch} أولاً!*\n\nاشترك ثم اضغط ✅ تحققت.",
+            reply_markup=subscription_required_keyboard(ch),
         )
         return False
 
@@ -769,9 +770,10 @@ async def handle_webapp_data(message: Message):
     if uid in banned_users:
         return
     if not await check_subscription(message.from_user.id):
+        ch = REQUIRED_CHANNEL or "القناة"
         await message.answer(
-            "⚠️ *يجب الاشتراك في قناتنا أولاً!*",
-            reply_markup=subscription_required_keyboard(REQUIRED_CHANNEL),
+            f"⚠️ *يجب الاشتراك في {ch} أولاً!*\n\nاشترك ثم اضغط ✅ تحققت.",
+            reply_markup=subscription_required_keyboard(ch),
         )
         return
 
