@@ -172,7 +172,8 @@ _firebase_token_expiry = 0
 # ═══════════════════════════════════════════════════════════
 #  Bot & Dispatcher
 # ═══════════════════════════════════════════════════════════
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+from aiogram.client.default import DefaultBotProperties
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp  = Dispatcher()
 
 # ═══════════════════════════════════════════════════════════
