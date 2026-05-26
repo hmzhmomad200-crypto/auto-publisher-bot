@@ -33,6 +33,7 @@ from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     Message,
+    WebAppData,
 )
 
 from keyboards import (
@@ -60,6 +61,7 @@ log = logging.getLogger(__name__)
 BOT_TOKEN    = os.getenv("BOT_TOKEN",    "ضع_توكن_البوت_هنا")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")
 ADMINS       = [int(x) for x in os.getenv("ADMINS", "123456789").split(",") if x.strip()]
+WEBAPP_URL   = os.getenv("WEBAPP_URL",   "https://yourdomain.com/index.html")
 
 GROQ_API_KEYS = [os.getenv(f"GROQ_API_KEY_{i}") for i in range(1, 7)]
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
@@ -170,8 +172,7 @@ _firebase_token_expiry = 0
 # ═══════════════════════════════════════════════════════════
 #  Bot & Dispatcher
 # ═══════════════════════════════════════════════════════════
-from aiogram.client.default import DefaultBotProperties
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp  = Dispatcher()
 
 # ═══════════════════════════════════════════════════════════
@@ -658,8 +659,10 @@ async def cmd_start(message: Message):
     if message.from_user.id in ADMINS:
         await message.answer("🛠 *لوحة الأدمن*", reply_markup=admin_menu())
 
-    # إشعار الأدمن بمستخدم جديد
-    if uid not in user_memory or user_memory[uid].get("msg_count", 0) == 0:
+    # إشعار الأدمن بمستخدم جديد — مرة واحدة فقط
+    if not user_memory[cid].get("notified"):
+        user_memory[cid]["notified"] = True
+        save_json(MEMORY_FILE, user_memory)
         uname_display = f"@{message.from_user.username}" if message.from_user.username else "بدون يوزر"
         notif = (
             f"🆕 *مستخدم جديد!*\n\n"
@@ -671,6 +674,62 @@ async def cmd_start(message: Message):
                 await bot.send_message(admin_id, notif)
             except Exception:
                 pass
+
+@dp.message(F.web_app_data)
+async def handle_webapp_data(message: Message):
+    """استقبال البيانات من Mini App"""
+    uid = str(message.from_user.id)
+    try:
+        data   = json.loads(message.web_app_data.data)
+        action = data.get("action", "")
+    except Exception:
+        await message.answer("❌ بيانات غير صالحة")
+        return
+
+    # ── تحقق أساسي ──
+    if uid in banned_users:
+        return
+    if not await check_subscription(message.from_user.id):
+        await message.answer(
+            "⚠️ *يجب الاشتراك في قناتنا أولاً!*",
+            reply_markup=subscription_required_keyboard(REQUIRED_CHANNEL),
+        )
+        return
+
+    # ── توجيه الأكشن ──
+    if action == "my_account":
+        uid_data  = user_memory.get(uid, {})
+        remaining = get_credits(uid)
+        bal_line  = "∞ (مجاني)" if FREE_MODE or uid in whitelist or message.from_user.id in ADMINS else str(remaining)
+        await message.answer(
+            f"💲 *حسابي*\n\n"
+            f"👤 الاسم: {message.from_user.first_name}\n"
+            f"🔋 الرصيد: `{bal_line}` رسالة\n"
+            f"📨 مجموع رسائلك: `{uid_data.get('msg_count', 0)}`\n"
+            f"📅 انضممت: `{uid_data.get('joined_at', '—')[:10]}`",
+            reply_markup=main_menu(),
+        )
+    elif action == "my_credits":
+        remaining = get_credits(uid)
+        bal_line  = "∞ غير محدود" if FREE_MODE or uid in whitelist or message.from_user.id in ADMINS else f"`{remaining}` رسالة"
+        await message.answer(
+            f"🔋 *رصيدك*\n\nالرصيد المتبقي: {bal_line}\n\nتواصل مع الأدمن لإضافة رصيد.",
+            reply_markup=credits_keyboard(),
+        )
+    elif action == "choose_model":
+        selected = user_model.get(uid, DEFAULT_MODEL)
+        await message.answer("🤖 *اختر النموذج:*", reply_markup=model_keyboard(selected))
+    elif action == "stats":
+        await message.answer(build_stats_text(message.chat.id), reply_markup=back_button())
+    elif action in ("updates", "promo_channel", "support"):
+        labels = {
+            "updates":      "🔥 تم فتح قناة التحديثات",
+            "promo_channel":"🔍 تم فتح قناة التفعيلات",
+            "support":      "📞 تواصل مع الدعم الفني",
+        }
+        await message.answer(labels[action], reply_markup=main_menu())
+    else:
+        await message.answer(f"✅ تم اختيار: `{action}`", reply_markup=main_menu())
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message):
